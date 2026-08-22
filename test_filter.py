@@ -51,6 +51,15 @@ class VacancyAnalysisTests(unittest.TestCase):
         self.assertIn("презентаци", result["matched_keywords"])
         self.assertIn("копирайтер", result["matched_stop_words"])
 
+    def test_rejects_3d_and_motion_specializations(self):
+        result = analyze_vacancy(
+            "Ищем 3D Motion Designer для рекламных креативов. Бюджет 10 000 ₽."
+        )
+
+        self.assertEqual(result["status"], "red")
+        self.assertIn("3d", result["matched_stop_words"])
+        self.assertIn("motion", result["matched_stop_words"])
+
 
 if __name__ == "__main__":
     unittest.main()

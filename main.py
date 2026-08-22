@@ -1,15 +1,30 @@
 import asyncio
+from html import escape
 import os
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from dotenv import load_dotenv
 
+from applications import build_application_text, build_chat_link, extract_contact_username
 from config import PORTFOLIO_URL
+from collectors.telegram_channel import fetch_all_channel_posts
 from filter import analyze_vacancy
 from filter_settings import MIN_PROJECT_BUDGET, WORK_TYPES
+from rejections import RejectionRepository
+from source_settings import (
+    COLLECTOR_POST_LIMIT,
+    TELEGRAM_CHANNELS,
+)
 
 load_dotenv()
 
@@ -19,7 +34,9 @@ if not bot_token:
     raise ValueError("BOT_TOKEN не найден в .env")
 
 
-session = AiohttpSession(proxy="http://127.0.0.1:12334")
+PROXY_URL = "http://127.0.0.1:12334"
+
+session = AiohttpSession(proxy=PROXY_URL)
 
 bot = Bot(
     token=bot_token,
@@ -27,6 +44,7 @@ bot = Bot(
 )
 
 dp = Dispatcher()
+rejection_repository = RejectionRepository("data/rejections.db")
 
 
 # Главное меню
@@ -67,6 +85,115 @@ def format_budget(budget):
     return "не указана"
 
 
+def format_collected_vacancy(post, result):
+    """Создаёт компактное сообщение с результатом анализа публикации."""
+
+    status_icons = {"green": "🟢", "yellow": "🟡"}
+    directions = ", ".join(result["work_types"])
+
+    return (
+        f"{status_icons[result['status']]} <b>{escape(post.title)}</b>\n\n"
+        f"<b>Бюджет:</b> {escape(format_budget(result['budget']))}\n"
+        f"<b>Источник:</b> {escape(post.source)}\n"
+        f"<b>Направления:</b> {escape(directions)}\n"
+        f"<b>Причина:</b> {escape(result['reason'])}\n\n"
+        f"<a href=\"{post.url}\">Открыть публикацию в канале</a>"
+    )
+
+
+def candidate_score(post, result, contact_username):
+    """Оценивает релевантность вакансии для выдачи первой."""
+
+    return (
+        contact_username is not None,
+        len(result["matched_keywords"]),
+        result["budget"]["max_amount"] or 0,
+        post.published_at or "",
+    )
+
+
+async def show_best_vacancy(message, user_id):
+    """Находит и отправляет одну лучшую ещё не отклонённую вакансию."""
+
+    try:
+        posts, unavailable_channels = await fetch_all_channel_posts(
+            TELEGRAM_CHANNELS,
+            limit=COLLECTOR_POST_LIMIT,
+            proxy=PROXY_URL,
+        )
+    except Exception:
+        await message.answer(
+            "Не удалось получить вакансии. Проверь подключение к proxy и повтори попытку позже."
+        )
+        return
+
+    candidates = []
+    for post in posts:
+        if rejection_repository.is_rejected(user_id, post.source_id):
+            continue
+
+        result = analyze_vacancy(post.description)
+        if result["status"] != "green":
+            continue
+
+        contact_username = extract_contact_username(post.description)
+        candidates.append((post, result, contact_username))
+
+    if not candidates:
+        await message.answer(
+            "Новых подходящих вакансий не найдено. Попробуй позже или измени настройки фильтра."
+        )
+        return
+
+    post, result, contact_username = max(
+        candidates,
+        key=lambda item: candidate_score(*item),
+    )
+
+    buttons = []
+    if contact_username:
+        draft = build_application_text(post.title)
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✉️ Написать заказчику",
+                    url=build_chat_link(contact_username, draft),
+                )
+            ]
+        )
+    else:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔗 Открыть публикацию",
+                    url=post.url,
+                )
+            ]
+        )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="✖️ Отклонить",
+                callback_data=f"reject:{post.source_id}",
+            )
+        ]
+    )
+
+    await message.answer(
+        format_collected_vacancy(post, result),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+    if unavailable_channels:
+        await message.answer(
+            "Часть источников недоступна: "
+            + ", ".join(f"@{username}" for username in unavailable_channels)
+        )
+
+
 @dp.message(Command("start"))
 async def start_command(message: Message):
     await message.answer(
@@ -79,9 +206,8 @@ async def start_command(message: Message):
 @dp.message()
 async def handle_buttons(message: Message):
     if message.text == "🔎 Найти вакансии":
-        await message.answer(
-            "🔎 Пришли текст вакансии, и я проверю её."
-        )
+        await message.answer("🔎 Ищу лучшую подходящую вакансию...")
+        await show_best_vacancy(message, message.from_user.id)
 
     elif message.text == "⭐ Подходящие вакансии":
         await message.answer(
@@ -133,6 +259,15 @@ async def handle_buttons(message: Message):
             ,
             parse_mode="HTML"
         )
+
+
+@dp.callback_query(F.data.startswith("reject:"))
+async def reject_vacancy(callback: CallbackQuery):
+    source_id = callback.data.removeprefix("reject:")
+    rejection_repository.reject(callback.from_user.id, source_id)
+    await callback.answer("Вакансия отклонена")
+    await callback.message.answer("✖️ Вакансия скрыта. Ищу следующую...")
+    await show_best_vacancy(callback.message, callback.from_user.id)
 
 
 async def main():
