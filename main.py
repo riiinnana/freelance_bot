@@ -7,8 +7,9 @@ from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 
-from config import MIN_BUDGET, WORK_TYPES, PORTFOLIO_URL
+from config import PORTFOLIO_URL
 from filter import analyze_vacancy
+from filter_settings import MIN_PROJECT_BUDGET, WORK_TYPES
 
 load_dotenv()
 
@@ -43,6 +44,29 @@ main_menu = ReplyKeyboardMarkup(
 )
 
 
+def format_budget(budget):
+    """Форматирует бюджет с упором на итоговую сумму за проект."""
+
+    payment_type = budget["payment_type"]
+
+    if payment_type == "fixed":
+        return f"{budget['estimated_project_total']} ₽ за проект"
+
+    if payment_type == "range":
+        return f"{budget['min_amount']}–{budget['max_amount']} ₽ за проект"
+
+    if payment_type == "hourly":
+        rate = f"{budget['hourly_rate']} ₽/час"
+        if budget["estimated_project_total"] is None:
+            return f"{rate}; количество часов не указано"
+        return (
+            f"{rate}; {budget['hours']} ч. = "
+            f"{budget['estimated_project_total']} ₽ за проект"
+        )
+
+    return "не указана"
+
+
 @dp.message(Command("start"))
 async def start_command(message: Message):
     await message.answer(
@@ -71,7 +95,7 @@ async def handle_buttons(message: Message):
 
         await message.answer(
             f"⚙️ <b>Твои настройки поиска</b>\n\n"
-            f"<b>Минимальный бюджет:</b> {MIN_BUDGET} ₽\n\n"
+            f"<b>Минимальная сумма за проект:</b> {MIN_PROJECT_BUDGET} ₽\n\n"
             f"<b>Подходящие направления:</b>\n"
             f"{work_types}\n\n"
             f"<b>Портфолио:</b>\n"
@@ -99,11 +123,7 @@ async def handle_buttons(message: Message):
 
         directions = ", ".join(result["work_types"])
 
-        budget = (
-            f"{result['budget']} ₽"
-            if result["budget"] is not None
-            else "не указан"
-        )
+        budget = format_budget(result["budget"])
 
         await message.answer(
             f"{icon} <b>{status}</b>\n\n"

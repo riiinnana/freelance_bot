@@ -1,122 +1,178 @@
 import re
 
-from config import MIN_BUDGET, WORK_TYPES, EXCLUDED_KEYWORDS
+from filter_settings import EXCLUDED_KEYWORDS, MIN_PROJECT_BUDGET, WORK_TYPES
+
+
+NUMBER = r"(\d{1,3}(?:[ \u00a0]\d{3})+|\d+)"
+CURRENCY = r"(?:₽|руб(?:лей|ля|ль)?|р\.)"
+
+
+def _parse_number(value):
+    return int(value.replace(" ", "").replace("\u00a0", ""))
+
+
+def _find_hours(text):
+    match = re.search(
+        rf"(?:на|около|примерно|до)?\s*{NUMBER}\s*(?:час(?:а|ов)?|ч\b)",
+        text.lower(),
+    )
+    return _parse_number(match.group(1)) if match else None
+
 
 def extract_budget(text):
+    """Возвращает сведения о бюджете и расчёт суммы за проект.
+
+    Поддерживаются фиксированная сумма, диапазон и почасовая ставка. Для
+    почасовой ставки итог считается только при указанном количестве часов.
     """
-    Ищет бюджет вакансии в тексте.
-    Возвращает число или None, если бюджет не найден.
-    """
 
-    patterns = [
-        r"(\d[\d\s]*)\s*(?:₽|руб(?:лей|ля)?|р\.)",
-        r"(?:бюджет|оплата|стоимость)[^\d]{0,20}(\d[\d\s]*)",
-    ]
+    text_lower = text.lower()
 
-    for pattern in patterns:
-        match = re.search(pattern, text.lower())
+    hourly_match = re.search(
+        rf"{NUMBER}\s*{CURRENCY}\s*(?:/|в\s+|за\s+)(?:час|ч\b)",
+        text_lower,
+    )
+    if hourly_match:
+        hourly_rate = _parse_number(hourly_match.group(1))
+        hours = _find_hours(text_lower)
+        total = hourly_rate * hours if hours is not None else None
+        return {
+            "payment_type": "hourly",
+            "amount": total,
+            "min_amount": total,
+            "max_amount": total,
+            "hourly_rate": hourly_rate,
+            "hours": hours,
+            "estimated_project_total": total,
+        }
 
-        if match:
-            budget_text = match.group(1)
-            budget_text = budget_text.replace(" ", "")
-            return int(budget_text)
+    range_match = re.search(
+        rf"(?:от\s*)?{NUMBER}\s*(?:-|–|—|до)\s*{NUMBER}\s*{CURRENCY}",
+        text_lower,
+    )
+    if range_match:
+        minimum = _parse_number(range_match.group(1))
+        maximum = _parse_number(range_match.group(2))
+        return {
+            "payment_type": "range",
+            "amount": None,
+            "min_amount": minimum,
+            "max_amount": maximum,
+            "hourly_rate": None,
+            "hours": None,
+            "estimated_project_total": None,
+        }
 
-    return None
+    fixed_match = re.search(
+        rf"{NUMBER}\s*{CURRENCY}|(?:бюджет|оплата|стоимость)[^\d]{{0,20}}{NUMBER}",
+        text_lower,
+    )
+    if fixed_match:
+        amount = _parse_number(next(value for value in fixed_match.groups() if value))
+        return {
+            "payment_type": "fixed",
+            "amount": amount,
+            "min_amount": amount,
+            "max_amount": amount,
+            "hourly_rate": None,
+            "hours": None,
+            "estimated_project_total": amount,
+        }
+
+    return {
+        "payment_type": None,
+        "amount": None,
+        "min_amount": None,
+        "max_amount": None,
+        "hourly_rate": None,
+        "hours": None,
+        "estimated_project_total": None,
+    }
 
 
 def find_work_types(text):
-    """
-    Ищет подходящие направления дизайна
-    по набору ключевых слов.
-    """
+    """Возвращает подходящие направления и совпавшие ключевые слова."""
 
     text_lower = text.lower()
-
-    found = []
+    work_types = []
+    matched_keywords = []
 
     for work_type, keywords in WORK_TYPES.items():
-        for keyword in keywords:
-            if keyword.lower() in text_lower:
-                found.append(work_type)
-                break
+        matches = [keyword for keyword in keywords if keyword.lower() in text_lower]
+        if matches:
+            work_types.append(work_type)
+            matched_keywords.extend(matches)
 
-    return found
+    return work_types, matched_keywords
+
+
+def find_stop_words(text):
+    """Возвращает стоп-слова, найденные в тексте вакансии."""
+
+    text_lower = text.lower()
+    return [keyword for keyword in EXCLUDED_KEYWORDS if keyword.lower() in text_lower]
+
+
+def _result(status, suitable, budget, work_types, matched_keywords, stop_words, reason):
+    return {
+        "status": status,
+        "suitable": suitable,
+        "budget": budget,
+        "work_types": work_types,
+        "matched_keywords": matched_keywords,
+        "matched_stop_words": stop_words,
+        "reason": reason,
+    }
 
 
 def analyze_vacancy(text):
-    """
-    Анализирует вакансию и возвращает статус:
-    green  = подходит
-    yellow = нужно проверить
-    red    = не подходит
-    """
-
-    text_lower = text.lower()
+    """Анализирует вакансию и оценивает общую сумму за проект."""
 
     budget = extract_budget(text)
-    work_types = find_work_types(text)
+    work_types, matched_keywords = find_work_types(text)
+    stop_words = find_stop_words(text)
 
-    # Проверяем исключения
-    excluded = []
+    if stop_words:
+        return _result(
+            "red", False, budget, work_types, matched_keywords, stop_words,
+            "Неподходящий тип работы: " + ", ".join(stop_words),
+        )
 
-    for keyword in EXCLUDED_KEYWORDS:
-        if keyword.lower() in text_lower:
-            excluded.append(keyword)
-
-    if excluded:
-        return {
-            "status": "red",
-            "suitable": False,
-            "budget": budget,
-            "work_types": work_types,
-            "reason": (
-                "Неподходящий тип работы: "
-                + ", ".join(excluded)
-            ),
-        }
-
-    # Проверяем направление
     if not work_types:
-        return {
-            "status": "red",
-            "suitable": False,
-            "budget": budget,
-            "work_types": [],
-            "reason": "Не найдено подходящее направление дизайна",
-        }
+        return _result(
+            "red", False, budget, [], matched_keywords, stop_words,
+            "Не найдено подходящее направление дизайна",
+        )
 
-    # Проверяем бюджет
-    if budget is not None and budget < MIN_BUDGET:
-        return {
-            "status": "red",
-            "suitable": False,
-            "budget": budget,
-            "work_types": work_types,
-            "reason": f"Бюджет ниже {MIN_BUDGET} ₽",
-        }
+    maximum = budget["max_amount"]
+    minimum = budget["min_amount"]
 
-    # Бюджет не указан
-    if budget is None:
-        return {
-            "status": "yellow",
-            "suitable": True,
-            "budget": None,
-            "work_types": work_types,
-            "reason": (
-                "Подходящее направление, "
-                "но бюджет не указан"
-            ),
-        }
+    if maximum is not None and maximum < MIN_PROJECT_BUDGET:
+        return _result(
+            "red", False, budget, work_types, matched_keywords, stop_words,
+            f"Сумма за проект ниже {MIN_PROJECT_BUDGET} ₽",
+        )
 
-    # Всё подходит
-    return {
-        "status": "green",
-        "suitable": True,
-        "budget": budget,
-        "work_types": work_types,
-        "reason": (
-            "Подходит по бюджету; "
-            "подходит по направлению: "
-            + ", ".join(work_types)
-        ),
-    }
+    if minimum is not None and minimum < MIN_PROJECT_BUDGET:
+        return _result(
+            "yellow", True, budget, work_types, matched_keywords, stop_words,
+            f"Сумма за проект может быть ниже {MIN_PROJECT_BUDGET} ₽",
+        )
+
+    if budget["payment_type"] == "hourly" and budget["hours"] is None:
+        return _result(
+            "yellow", True, budget, work_types, matched_keywords, stop_words,
+            "Указана почасовая ставка, но не указано количество часов",
+        )
+
+    if maximum is None:
+        return _result(
+            "yellow", True, budget, work_types, matched_keywords, stop_words,
+            "Подходящее направление, но сумма за проект не указана",
+        )
+
+    return _result(
+        "green", True, budget, work_types, matched_keywords, stop_words,
+        "Подходит по сумме за проект; подходит по направлению: "
+        + ", ".join(work_types),
+    )

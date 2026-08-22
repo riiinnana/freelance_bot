@@ -1,117 +1,56 @@
-from filter import analyze_vacancy
+import unittest
+
+from filter import analyze_vacancy, extract_budget
 
 
-test_vacancies = [
-    """
-    Нужен дизайнер для создания презентации проекта.
-    12 слайдов, дедлайн через 3 дня.
-    Бюджет: 5000 ₽.
-    """,
+class BudgetExtractionTests(unittest.TestCase):
+    def test_fixed_project_budget(self):
+        budget = extract_budget("Нужна презентация. Бюджет: 5 000 ₽.")
 
-    """
-    Нужно оформить 10 слайдов коммерческого предложения.
-    Есть готовый текст и структура.
-    Оплата 7000 рублей.
-    """,
+        self.assertEqual(budget["payment_type"], "fixed")
+        self.assertEqual(budget["estimated_project_total"], 5000)
 
-    """
-    Ищем дизайнера для оформления 8 карточек товара
-    для Wildberries.
-    Бюджет 4500 ₽.
-    """,
+    def test_budget_range(self):
+        budget = extract_budget("Нужен дизайн баннеров, бюджет 3 000–5 000 рублей.")
 
-    """
-    Нужно оформить визуал магазина на WB:
-    инфографика, изображения товара, первый экран.
-    Бюджет 4000 ₽.
-    """,
+        self.assertEqual(budget["payment_type"], "range")
+        self.assertEqual(budget["min_amount"], 3000)
+        self.assertEqual(budget["max_amount"], 5000)
 
-    """
-    Требуется дизайнер для создания инфографики
-    для товаров на Ozon.
-    6 изображений, бюджет 3000 ₽.
-    """,
+    def test_hourly_rate_with_hours_calculates_project_total(self):
+        budget = extract_budget("Презентация: 700 ₽/час, работа на 8 часов.")
 
-    """
-    Сделать современный постер для музыкального мероприятия.
-    Размеры для печати и соцсетей.
-    Бюджет: 2500 ₽.
-    """,
+        self.assertEqual(budget["payment_type"], "hourly")
+        self.assertEqual(budget["hourly_rate"], 700)
+        self.assertEqual(budget["hours"], 8)
+        self.assertEqual(budget["estimated_project_total"], 5600)
 
-    """
-    Нужна обложка для YouTube-видео.
-    Нужно сделать 3 варианта.
-    Оплата 2000 рублей.
-    """,
+    def test_hourly_rate_without_hours_has_no_project_total(self):
+        budget = extract_budget("Нужны слайды, оплата 700 ₽ в час.")
 
-    """
-    Ищем дизайнера для оформления постов
-    в Telegram и VK.
-    Нужно 10 публикаций.
-    Бюджет 3500 ₽.
-    """,
-
-    """
-    Требуется разработать логотип бренда.
-    Бюджет 10000 ₽.
-    """,
-
-    """
-    Нужен дизайнер сайта интернет-магазина.
-    Полный дизайн в Figma.
-    Бюджет 30000 ₽.
-    """,
-
-    """
-    Сделать презентацию компании на 15 слайдов.
-    Бюджет всего 1000 ₽.
-    """,
-
-    """
-    Нужно сделать 20 карточек товаров для маркетплейса.
-    Оплата 800 ₽ за весь проект.
-    """,
-
-    """
-    Ищем копирайтера для написания 20 постов
-    в Telegram.
-    Бюджет 5000 ₽.
-    """,
-
-    """
-    Нужен дизайнер для оформления презентации
-    и рекламных баннеров.
-    Бюджет 8000 ₽.
-    """,
-
-    """
-    Ищем дизайнера для создания афиши мероприятия.
-    Подробности и оплату обсудим лично.
-    """,
-]
+        self.assertEqual(budget["payment_type"], "hourly")
+        self.assertIsNone(budget["estimated_project_total"])
 
 
-status_icons = {
-    "green": "🟢",
-    "yellow": "🟡",
-    "red": "🔴",
-}
+class VacancyAnalysisTests(unittest.TestCase):
+    def test_range_partly_below_minimum_needs_review(self):
+        result = analyze_vacancy("Сделать презентацию. Бюджет 1 000–3 000 ₽.")
+
+        self.assertEqual(result["status"], "yellow")
+
+    def test_low_calculated_hourly_project_total_is_rejected(self):
+        result = analyze_vacancy("Нужна обложка: 400 ₽/час на 3 часа.")
+
+        self.assertEqual(result["status"], "red")
+        self.assertEqual(result["budget"]["estimated_project_total"], 1200)
+
+    def test_returns_matched_keywords_and_stop_words(self):
+        result = analyze_vacancy("Ищем копирайтера для презентации. Бюджет 5 000 ₽.")
+
+        self.assertEqual(result["status"], "red")
+        self.assertIn("презентаци", result["matched_keywords"])
+        self.assertIn("копирайтер", result["matched_stop_words"])
 
 
-for number, vacancy in enumerate(test_vacancies, start=1):
-    result = analyze_vacancy(vacancy)
-
-    print("=" * 60)
-    print(f"ВАКАНСИЯ №{number}")
-    print(vacancy.strip())
-    print()
-
-    print(
-        f"Статус: "
-        f"{status_icons.get(result['status'], '❓')} "
-        f"{result['status']}"
-    )
-
-    print(f"Бюджет: {result['budget']}")
-    print(f"Направления: {result['work_types']}")
-    print(f"Причина: {result['reason']}")
+if __name__ == "__main__":
+    unittest.main()
