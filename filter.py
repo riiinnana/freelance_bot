@@ -21,6 +21,40 @@ CURRENCY = r"(?:₽|руб(?:лей|ля|ль)?|р\.)"
 OFF_PROFILE_PRIORITY = 10 ** 6
 
 
+def _compile_keyword(keyword):
+    """Собирает шаблон поиска ключевого слова.
+
+    Звёздочка означает «и любое окончание», поэтому `"презентаци*"` найдёт
+    и презентацию, и презентаций. Поиск всегда начинается с начала слова, а
+    слово без звёздочки должно совпасть целиком — так «моушн» перестаёт
+    находиться в середине постороннего слова.
+    """
+
+    parts = [re.escape(part) for part in keyword.split("*")]
+    pattern = r"\b" + r"\w*".join(parts)
+    if not keyword.endswith("*"):
+        pattern += r"\b"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _compile_keywords(keywords):
+    """Возвращает пары «слово для показа — шаблон поиска»."""
+
+    return tuple(
+        (keyword.replace("*", ""), _compile_keyword(keyword))
+        for keyword in keywords
+    )
+
+
+# Шаблоны собираются один раз при загрузке модуля, а не на каждую вакансию.
+_DIRECTION_PATTERNS = tuple(
+    (direction, _compile_keywords(direction.keywords))
+    for direction in DIRECTIONS
+)
+
+_STOP_WORD_PATTERNS = _compile_keywords(UNIVERSAL_STOP_WORDS)
+
+
 def _parse_number(value):
     return int(value.replace(" ", "").replace(" ", ""))
 
@@ -107,13 +141,12 @@ def extract_budget(text):
 def find_directions(text):
     """Возвращает ключи найденных направлений и совпавшие ключевые слова."""
 
-    text_lower = text.lower()
     direction_keys = []
     matched_keywords = []
 
-    for direction in DIRECTIONS:
+    for direction, patterns in _DIRECTION_PATTERNS:
         matches = [
-            keyword for keyword in direction.keywords if keyword in text_lower
+            keyword for keyword, pattern in patterns if pattern.search(text)
         ]
         if matches:
             direction_keys.append(direction.key)
@@ -125,8 +158,10 @@ def find_directions(text):
 def find_stop_words(text):
     """Возвращает универсальные стоп-слова, найденные в тексте вакансии."""
 
-    text_lower = text.lower()
-    return [keyword for keyword in UNIVERSAL_STOP_WORDS if keyword in text_lower]
+    return [
+        keyword for keyword, pattern in _STOP_WORD_PATTERNS
+        if pattern.search(text)
+    ]
 
 
 def classify_vacancy(text):

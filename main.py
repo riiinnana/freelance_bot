@@ -20,7 +20,13 @@ from dotenv import load_dotenv
 from applications import build_application_text, build_chat_link, extract_contact_username
 from config import PORTFOLIO_URL
 from collectors.telegram_channel import fetch_all_channel_posts
-from directions import DIRECTIONS, direction_names
+from directions import (
+    DIRECTION_BY_KEY,
+    GROUPS,
+    direction_names,
+    directions_in_group,
+    group_name,
+)
 from filter import analyze_vacancy
 from profiles import MAX_ALLOWED_BUDGET, MIN_ALLOWED_BUDGET, ProfileRepository
 from rejections import RejectionRepository
@@ -135,17 +141,29 @@ def build_settings_text(profile):
     )
 
 
+def _selected_in_group(group_key, profile):
+    """Считает, сколько направлений блока отмечено у пользователя."""
+
+    return sum(
+        1
+        for direction in directions_in_group(group_key)
+        if direction.key in profile.direction_keys
+    )
+
+
 def build_settings_keyboard(profile):
-    """Собирает клавиатуру настроек с галочками направлений."""
+    """Собирает главный экран настроек: блоки, сумма и строгий режим."""
 
     rows = []
-    for direction in DIRECTIONS:
-        mark = "✅" if direction.key in profile.direction_keys else "⬜"
+    for group in GROUPS:
+        chosen = _selected_in_group(group.key, profile)
+        total = len(directions_in_group(group.key))
+        mark = "✅" if chosen else "⬜"
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{mark} {direction.name}",
-                    callback_data=f"dir:{direction.key}",
+                    text=f"{mark} {group.name} — {chosen}/{total}",
+                    callback_data=f"grp:{group.key}",
                 )
             ]
         )
@@ -165,6 +183,67 @@ def build_settings_keyboard(profile):
             InlineKeyboardButton(
                 text=f"🎯 Строгий режим: {strict_label}",
                 callback_data="settings:strict",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_group_text(group_key, profile):
+    """Описывает один блок направлений."""
+
+    chosen = [
+        direction.name
+        for direction in directions_in_group(group_key)
+        if direction.key in profile.direction_keys
+    ]
+
+    if chosen:
+        chosen_block = "Отмечено: " + escape(", ".join(chosen))
+    else:
+        chosen_block = "Пока ничего не отмечено."
+
+    return (
+        f"<b>{escape(group_name(group_key))}</b>\n\n"
+        f"{chosen_block}\n\n"
+        "Порядок важен: что отметишь раньше, то будет выше в выдаче."
+    )
+
+
+def build_group_keyboard(group_key, profile):
+    """Собирает экран одного блока с галочками направлений."""
+
+    directions = directions_in_group(group_key)
+    rows = []
+
+    for direction in directions:
+        mark = "✅" if direction.key in profile.direction_keys else "⬜"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{mark} {direction.name}",
+                    callback_data=f"dir:{direction.key}",
+                )
+            ]
+        )
+
+    all_chosen = all(
+        direction.key in profile.direction_keys for direction in directions
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✖️ Снять весь блок" if all_chosen else "✅ Отметить весь блок",
+                callback_data=f"grpall:{group_key}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ К настройкам",
+                callback_data="settings:back",
             )
         ]
     )
@@ -402,6 +481,57 @@ async def handle_buttons(message: Message):
         )
 
 
+@dp.callback_query(F.data.startswith("grp:"))
+async def open_group(callback: CallbackQuery):
+    group_key = callback.data.removeprefix("grp:")
+    profile = profile_repository.get(callback.from_user.id)
+
+    await callback.answer()
+    await callback.message.edit_text(
+        build_group_text(group_key, profile),
+        parse_mode="HTML",
+        reply_markup=build_group_keyboard(group_key, profile),
+    )
+
+
+@dp.callback_query(F.data.startswith("grpall:"))
+async def toggle_whole_group(callback: CallbackQuery):
+    group_key = callback.data.removeprefix("grpall:")
+    profile = profile_repository.get(callback.from_user.id)
+    directions = directions_in_group(group_key)
+
+    turning_off = all(
+        direction.key in profile.direction_keys for direction in directions
+    )
+    for direction in directions:
+        is_selected = direction.key in profile.direction_keys
+        if is_selected == turning_off:
+            profile_repository.toggle_direction(
+                callback.from_user.id, direction.key
+            )
+
+    await callback.answer("Блок снят" if turning_off else "Блок отмечен")
+
+    profile = profile_repository.get(callback.from_user.id)
+    await callback.message.edit_text(
+        build_group_text(group_key, profile),
+        parse_mode="HTML",
+        reply_markup=build_group_keyboard(group_key, profile),
+    )
+
+
+@dp.callback_query(F.data == "settings:back")
+async def back_to_settings(callback: CallbackQuery):
+    profile = profile_repository.get(callback.from_user.id)
+
+    await callback.answer()
+    await callback.message.edit_text(
+        build_settings_text(profile),
+        parse_mode="HTML",
+        reply_markup=build_settings_keyboard(profile),
+    )
+
+
 @dp.callback_query(F.data.startswith("dir:"))
 async def toggle_direction(callback: CallbackQuery):
     direction_key = callback.data.removeprefix("dir:")
@@ -416,11 +546,12 @@ async def toggle_direction(callback: CallbackQuery):
 
     await callback.answer("Направление добавлено" if is_selected else "Направление убрано")
 
+    group_key = DIRECTION_BY_KEY[direction_key].group
     profile = profile_repository.get(callback.from_user.id)
     await callback.message.edit_text(
-        build_settings_text(profile),
+        build_group_text(group_key, profile),
         parse_mode="HTML",
-        reply_markup=build_settings_keyboard(profile),
+        reply_markup=build_group_keyboard(group_key, profile),
     )
 
 

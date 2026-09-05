@@ -1,6 +1,18 @@
 import unittest
 
-from filter import analyze_vacancy, classify_vacancy, evaluate_for_user, extract_budget
+from directions import (
+    DIRECTIONS,
+    GROUP_BY_KEY,
+    GROUPS,
+    directions_in_group,
+)
+from filter import (
+    analyze_vacancy,
+    classify_vacancy,
+    evaluate_for_user,
+    extract_budget,
+    find_directions,
+)
 from profiles import UserProfile
 
 
@@ -61,7 +73,7 @@ class ClassificationTests(unittest.TestCase):
     def test_universal_stop_words_are_still_global(self):
         classification = classify_vacancy("Ищем копирайтера для презентации.")
 
-        self.assertIn("копирайтер", classification["matched_stop_words"])
+        self.assertIn("копирайт", classification["matched_stop_words"])
 
     def test_animation_is_a_direction_not_a_stop_word(self):
         classification = classify_vacancy("Нужен аниматор, motion для рекламы.")
@@ -153,7 +165,7 @@ class VacancyAnalysisTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "red")
         self.assertIn("презентаци", result["matched_keywords"])
-        self.assertIn("копирайтер", result["matched_stop_words"])
+        self.assertIn("копирайт", result["matched_stop_words"])
 
     def test_rejects_work_that_is_not_design_for_everyone(self):
         result = analyze_vacancy(
@@ -163,6 +175,97 @@ class VacancyAnalysisTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "red")
         self.assertEqual(result["reason_code"], "stop_words")
+
+
+class KeywordBoundaryTests(unittest.TestCase):
+    """Ключевые слова ищутся с начала слова, а не кусками внутри него."""
+
+    def test_latin_keyword_does_not_match_inside_another_word(self):
+        # "wb" не должно находиться внутри "webflow".
+        keys, _ = find_directions("Нужен дизайн сайта на webflow. Бюджет 10 000 руб.")
+
+        self.assertNotIn("product_cards", keys)
+
+    def test_3d_does_not_match_inside_a_number_word(self):
+        keys, _ = find_directions("Работа на 3days, нужны баннеры. Бюджет 9 000 руб.")
+
+        self.assertEqual(keys, ["banners"])
+
+    def test_stop_word_matches_with_a_hyphen_suffix(self):
+        classification = classify_vacancy("Ищем seo-специалиста. Бюджет 30 000 руб.")
+
+        self.assertIn("seo", classification["matched_stop_words"])
+
+    def test_stem_marker_covers_word_endings(self):
+        keys, matched = find_directions("Нужны презентации, слайдов много.")
+
+        self.assertEqual(keys, ["presentations"])
+        self.assertIn("презентаци", matched)
+        self.assertIn("слайд", matched)
+
+    def test_stem_marker_works_in_the_middle_of_a_phrase(self):
+        keys, _ = find_directions("Нужны вертикальные видео для соцсетей.")
+
+        self.assertIn("reels", keys)
+
+
+class ThreeDSphereTests(unittest.TestCase):
+    """Блок 3D разделён на сферы, а не на одно общее направление."""
+
+    def test_interior_vacancy_matches_archviz_sphere(self):
+        keys, _ = find_directions(
+            "Нужна визуализация интерьера квартиры. Бюджет 40 000 руб."
+        )
+
+        self.assertIn("three_d_archviz", keys)
+
+    def test_product_visualization_is_its_own_sphere(self):
+        keys, _ = find_directions(
+            "Нужна предметная визуализация мебели для каталога."
+        )
+
+        self.assertIn("three_d_product", keys)
+
+    def test_character_artist_does_not_match_archviz(self):
+        keys, _ = find_directions("Ищем 3D-художника по персонажам для игры.")
+
+        self.assertIn("three_d_character", keys)
+        self.assertNotIn("three_d_archviz", keys)
+
+    def test_illustrator_vacancy_is_not_a_3d_character_job(self):
+        # "персонаж" встречается и у иллюстраторов, поэтому слово берётся
+        # только в связке с 3D-контекстом.
+        keys, _ = find_directions(
+            "Нужен иллюстратор, нарисовать персонажей для книги."
+        )
+
+        self.assertNotIn("three_d_character", keys)
+
+    def test_archviz_user_does_not_get_character_work(self):
+        classification = classify_vacancy(
+            "Ищем 3D-художника по персонажам для игры. Бюджет 60 000 руб."
+        )
+        archviz_designer = make_profile(["three_d_archviz"])
+
+        result = evaluate_for_user(classification, archviz_designer)
+
+        self.assertEqual(result["status"], "red")
+        self.assertEqual(result["reason_code"], "off_profile_strict")
+
+
+class DirectionCatalogueTests(unittest.TestCase):
+    def test_every_direction_belongs_to_a_known_group(self):
+        for direction in DIRECTIONS:
+            self.assertIn(direction.group, GROUP_BY_KEY, direction.key)
+
+    def test_every_group_has_directions(self):
+        for group in GROUPS:
+            self.assertTrue(directions_in_group(group.key), group.key)
+
+    def test_direction_keys_are_unique(self):
+        keys = [direction.key for direction in DIRECTIONS]
+
+        self.assertEqual(len(keys), len(set(keys)))
 
 
 if __name__ == "__main__":
