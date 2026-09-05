@@ -67,11 +67,40 @@ class ContactExtractionTests(unittest.TestCase):
 
 class ApplicationTests(unittest.TestCase):
     def test_builds_chat_link_with_draft_text(self):
-        draft = build_application_text("Дизайн презентации")
+        draft = build_application_text(
+            "Дизайн презентации", "https://example.com/portfolio"
+        )
         link = build_chat_link("company_hr", draft)
 
         self.assertTrue(link.startswith("https://t.me/company_hr?text="))
         self.assertIn("Портфолио", draft)
+
+    def test_draft_uses_the_personal_portfolio_link(self):
+        draft = build_application_text(
+            "Дизайн презентации", "https://behance.net/me", ("presentations",)
+        )
+
+        self.assertIn("https://behance.net/me", draft)
+
+    def test_draft_mentions_the_actual_kind_of_work(self):
+        cards = build_application_text(
+            "Карточки для WB", "https://example.com/p", ("product_cards",)
+        )
+        archviz = build_application_text(
+            "Визуализация квартиры", "https://example.com/p", ("three_d_archviz",)
+        )
+
+        self.assertIn("карточки товаров", cards.lower())
+        self.assertIn("интерьер", archviz.lower())
+        self.assertNotEqual(cards, archviz)
+
+    def test_unknown_direction_falls_back_to_the_general_draft(self):
+        draft = build_application_text(
+            "Странная задача", "https://example.com/p", ()
+        )
+
+        self.assertIn("Странная задача", draft)
+        self.assertIn("https://example.com/p", draft)
 
 
 if __name__ == "__main__":

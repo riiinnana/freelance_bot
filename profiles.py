@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from directions import DIRECTION_BY_KEY
+from config import DEFAULT_PORTFOLIO_URL
 from filter_settings import DEFAULT_MIN_BUDGET
 
 
@@ -15,6 +16,17 @@ DEFAULT_STRICT_MODE = True
 
 MIN_ALLOWED_BUDGET = 0
 MAX_ALLOWED_BUDGET = 10_000_000
+
+
+def is_valid_portfolio_url(url):
+    """Проверяет, что ссылка похожа на адрес, а не на случайный текст."""
+
+    url = url.strip()
+    return (
+        url.startswith(("http://", "https://"))
+        and " " not in url
+        and len(url) > len("https://")
+    )
 
 
 @dataclass(frozen=True)
@@ -29,12 +41,17 @@ class UserProfile:
     direction_keys: tuple
     min_budget: int
     strict_mode: bool
+    portfolio_url: str
 
     @property
     def is_configured(self):
         """Профиль готов к поиску, если выбрано хотя бы одно направление."""
 
         return bool(self.direction_keys)
+
+    @property
+    def has_portfolio(self):
+        return bool(self.portfolio_url)
 
 
 class ProfileRepository:
@@ -45,12 +62,14 @@ class ProfileRepository:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_profiles (
-                    user_id     INTEGER PRIMARY KEY,
-                    min_budget  INTEGER NOT NULL,
-                    strict_mode INTEGER NOT NULL DEFAULT 1
+                    user_id       INTEGER PRIMARY KEY,
+                    min_budget    INTEGER NOT NULL,
+                    strict_mode   INTEGER NOT NULL DEFAULT 1,
+                    portfolio_url TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            self._add_missing_columns(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_directions (
@@ -65,13 +84,40 @@ class ProfileRepository:
     def _connect(self):
         return sqlite3.connect(self.database_path, isolation_level=None)
 
+    @staticmethod
+    def _add_missing_columns(connection):
+        """Дописывает колонки, появившиеся позже создания базы.
+
+        Без этого база, созданная прошлой версией бота, теряла бы профили
+        при обновлении.
+        """
+
+        existing = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(user_profiles)"
+            ).fetchall()
+        }
+
+        if "portfolio_url" not in existing:
+            connection.execute(
+                "ALTER TABLE user_profiles "
+                "ADD COLUMN portfolio_url TEXT NOT NULL DEFAULT ''"
+            )
+
     def _ensure_profile(self, connection, user_id):
         connection.execute(
             """
-            INSERT OR IGNORE INTO user_profiles (user_id, min_budget, strict_mode)
-            VALUES (?, ?, ?)
+            INSERT OR IGNORE INTO user_profiles
+                (user_id, min_budget, strict_mode, portfolio_url)
+            VALUES (?, ?, ?, ?)
             """,
-            (user_id, DEFAULT_MIN_BUDGET, int(DEFAULT_STRICT_MODE)),
+            (
+                user_id,
+                DEFAULT_MIN_BUDGET,
+                int(DEFAULT_STRICT_MODE),
+                DEFAULT_PORTFOLIO_URL,
+            ),
         )
 
     def get(self, user_id):
@@ -80,8 +126,9 @@ class ProfileRepository:
         with closing(self._connect()) as connection:
             self._ensure_profile(connection, user_id)
 
-            min_budget, strict_mode = connection.execute(
-                "SELECT min_budget, strict_mode FROM user_profiles WHERE user_id = ?",
+            min_budget, strict_mode, portfolio_url = connection.execute(
+                "SELECT min_budget, strict_mode, portfolio_url "
+                "FROM user_profiles WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
 
@@ -105,6 +152,7 @@ class ProfileRepository:
             direction_keys=keys,
             min_budget=min_budget,
             strict_mode=bool(strict_mode),
+            portfolio_url=portfolio_url or "",
         )
 
     def toggle_direction(self, user_id, direction_key):
@@ -162,6 +210,20 @@ class ProfileRepository:
             connection.execute(
                 "UPDATE user_profiles SET min_budget = ? WHERE user_id = ?",
                 (amount, user_id),
+            )
+
+    def set_portfolio_url(self, user_id, url):
+        """Сохраняет ссылку на портфолио пользователя."""
+
+        url = url.strip()
+        if not is_valid_portfolio_url(url):
+            raise ValueError("Ссылка должна начинаться с http:// или https://")
+
+        with closing(self._connect()) as connection:
+            self._ensure_profile(connection, user_id)
+            connection.execute(
+                "UPDATE user_profiles SET portfolio_url = ? WHERE user_id = ?",
+                (url, user_id),
             )
 
     def set_strict_mode(self, user_id, enabled):

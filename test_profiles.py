@@ -1,5 +1,7 @@
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from filter_settings import DEFAULT_MIN_BUDGET
@@ -61,6 +63,72 @@ class ProfileRepositoryTests(unittest.TestCase):
     def test_budget_outside_allowed_range_is_rejected(self):
         with self.assertRaises(ValueError):
             self.repository.set_min_budget(100, -1)
+
+    def test_portfolio_url_is_saved_and_returned(self):
+        self.repository.set_portfolio_url(100, "https://behance.net/me")
+
+        profile = self.repository.get(100)
+
+        self.assertEqual(profile.portfolio_url, "https://behance.net/me")
+        self.assertTrue(profile.has_portfolio)
+
+    def test_new_profile_has_no_portfolio(self):
+        self.assertFalse(self.repository.get(100).has_portfolio)
+
+    def test_text_that_is_not_a_link_is_rejected(self):
+        for value in ("мой сайт", "behance.net/me", "https://два слова"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.repository.set_portfolio_url(100, value)
+
+
+class ProfileMigrationTests(unittest.TestCase):
+    """База, созданная прошлой версией бота, не должна терять настройки."""
+
+    def test_old_database_gains_the_portfolio_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "old.db"
+
+            # Схема до появления портфолио. `with` у sqlite3 закрывает
+            # только транзакцию, поэтому соединение закрываем явно —
+            # иначе на Windows файл останется заблокированным.
+            with closing(
+                sqlite3.connect(database_path, isolation_level=None)
+            ) as old:
+                old.execute(
+                    """
+                    CREATE TABLE user_profiles (
+                        user_id     INTEGER PRIMARY KEY,
+                        min_budget  INTEGER NOT NULL,
+                        strict_mode INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+                old.execute(
+                    """
+                    CREATE TABLE user_directions (
+                        user_id       INTEGER NOT NULL,
+                        direction_key TEXT NOT NULL,
+                        priority      INTEGER NOT NULL,
+                        PRIMARY KEY (user_id, direction_key)
+                    )
+                    """
+                )
+                old.execute(
+                    "INSERT INTO user_profiles VALUES (100, 7000, 0)"
+                )
+                old.execute(
+                    "INSERT INTO user_directions VALUES (100, 'banners', 0)"
+                )
+
+            repository = ProfileRepository(database_path)
+            profile = repository.get(100)
+
+            # Прежние настройки на месте, портфолио просто пустое.
+            self.assertEqual(profile.min_budget, 7000)
+            self.assertFalse(profile.strict_mode)
+            self.assertEqual(profile.direction_keys, ("banners",))
+            self.assertEqual(profile.portfolio_url, "")
 
 
 if __name__ == "__main__":

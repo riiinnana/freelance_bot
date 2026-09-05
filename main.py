@@ -18,7 +18,6 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 from applications import build_application_text, build_chat_link, extract_contact_username
-from config import PORTFOLIO_URL
 from collectors.telegram_channel import fetch_all_channel_posts
 from directions import (
     DIRECTION_BY_KEY,
@@ -28,7 +27,11 @@ from directions import (
     group_name,
 )
 from filter import analyze_vacancy
-from profiles import MAX_ALLOWED_BUDGET, MIN_ALLOWED_BUDGET, ProfileRepository
+from profiles import (
+    MAX_ALLOWED_BUDGET,
+    MIN_ALLOWED_BUDGET,
+    ProfileRepository,
+)
 from rejections import RejectionRepository
 from source_settings import (
     COLLECTOR_POST_LIMIT,
@@ -67,6 +70,7 @@ CHANNEL_USERNAMES = [channel["username"] for channel in TELEGRAM_CHANNELS]
 
 class SettingsStates(StatesGroup):
     waiting_for_budget = State()
+    waiting_for_portfolio = State()
 
 
 # Главное меню
@@ -132,12 +136,18 @@ def build_settings_text(profile):
         else "Показываю и смежные направления, но в конце списка."
     )
 
+    portfolio_block = (
+        escape(profile.portfolio_url)
+        if profile.has_portfolio
+        else "не указано — без него отклик уйдёт без ссылки на работы."
+    )
+
     return (
         "⚙️ <b>Настройки поиска</b>\n\n"
         f"{directions_block}\n\n"
         f"<b>Минимальная сумма за проект:</b> {profile.min_budget} ₽\n"
         f"<b>Строгий режим:</b> {strict_block}\n\n"
-        f"<b>Портфолио:</b>\n{escape(PORTFOLIO_URL)}"
+        f"<b>Портфолио:</b>\n{portfolio_block}"
     )
 
 
@@ -173,6 +183,19 @@ def build_settings_keyboard(profile):
             InlineKeyboardButton(
                 text=f"💰 Минимальная сумма: {profile.min_budget} ₽",
                 callback_data="settings:budget",
+            )
+        ]
+    )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=(
+                    "🔗 Портфолио: указано"
+                    if profile.has_portfolio
+                    else "🔗 Портфолио: добавить"
+                ),
+                callback_data="settings:portfolio",
             )
         ]
     )
@@ -301,6 +324,14 @@ async def show_best_vacancy(message, user_id):
         await send_settings(message, profile)
         return
 
+    if not profile.has_portfolio:
+        await message.answer(
+            "Добавь ссылку на портфолио — она подставляется в отклик "
+            "заказчику. Это в «⚙️ Настройки»."
+        )
+        await send_settings(message, profile)
+        return
+
     try:
         posts, unavailable_channels = await fetch_all_channel_posts(
             TELEGRAM_CHANNELS,
@@ -342,7 +373,11 @@ async def show_best_vacancy(message, user_id):
 
     buttons = []
     if contact_username:
-        draft = build_application_text(post.title)
+        draft = build_application_text(
+            post.title,
+            profile.portfolio_url,
+            result["profile_direction_keys"] or result["direction_keys"],
+        )
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -392,8 +427,9 @@ async def start_command(message: Message, state: FSMContext):
     if not profile.is_configured:
         await message.answer(
             "Привет! Я помогаю искать фриланс-вакансии по дизайну.\n\n"
-            "Чтобы я показывал только нужное, отметь свои направления. "
-            "Порядок важен: что отметишь первым, то и будет выше в выдаче.",
+            "Чтобы я показывал только нужное, отметь свои направления — "
+            "порядок важен, что отметишь первым, то и будет выше в выдаче.\n"
+            "И добавь ссылку на портфолио: она подставляется в отклик.",
             reply_markup=main_menu,
         )
         await send_settings(message, profile)
@@ -430,6 +466,26 @@ async def set_budget(message: Message, state: FSMContext):
 
     profile = profile_repository.get(message.from_user.id)
     await message.answer(f"Готово, минимальная сумма теперь {amount} ₽.")
+    await send_settings(message, profile)
+
+
+@dp.message(SettingsStates.waiting_for_portfolio)
+async def set_portfolio(message: Message, state: FSMContext):
+    try:
+        profile_repository.set_portfolio_url(
+            message.from_user.id, message.text or ""
+        )
+    except ValueError:
+        await message.answer(
+            "Нужна ссылка целиком, вместе с http:// или https://.\n"
+            "Отправь её ещё раз или нажми /start, чтобы выйти."
+        )
+        return
+
+    await state.clear()
+
+    profile = profile_repository.get(message.from_user.id)
+    await message.answer("Готово, ссылка на портфолио сохранена.")
     await send_settings(message, profile)
 
 
@@ -571,6 +627,17 @@ async def toggle_strict_mode(callback: CallbackQuery):
         build_settings_text(profile),
         parse_mode="HTML",
         reply_markup=build_settings_keyboard(profile),
+    )
+
+
+@dp.callback_query(F.data == "settings:portfolio")
+async def ask_portfolio(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsStates.waiting_for_portfolio)
+    await callback.answer()
+    await callback.message.answer(
+        "Пришли ссылку на своё портфолио — она подставляется в отклик "
+        "заказчику.\n"
+        "Например: https://behance.net/username"
     )
 
 

@@ -3,8 +3,11 @@
 import re
 from urllib.parse import quote
 
-from application_settings import APPLICATION_TEMPLATE
-from config import PORTFOLIO_URL
+from application_settings import (
+    APPLICATION_TEMPLATE,
+    DEFAULT_PITCH,
+    PITCH_BY_DIRECTION,
+)
 
 
 USERNAME = r"[A-Za-z][A-Za-z0-9_]{4,31}"
@@ -89,12 +92,30 @@ def extract_contact_username(text, source_username=None, excluded_usernames=()):
     return candidates[-1][1]
 
 
-def build_application_text(title):
-    """Создаёт редактируемый черновик отклика."""
+def build_application_text(title, portfolio_url, direction_keys=()):
+    """Создаёт редактируемый черновик отклика.
+
+    Фраза подбирается под то направление вакансии, которое стоит у
+    пользователя первым по приоритету, — так отклик говорит о конкретной
+    задаче, а не «заинтересовала ваша вакансия».
+
+    Это единственное место, где собирается текст отклика: если однажды
+    захочется генерировать его моделью, менять нужно только эту функцию.
+    """
+
+    pitch = next(
+        (
+            PITCH_BY_DIRECTION[key]
+            for key in direction_keys
+            if key in PITCH_BY_DIRECTION
+        ),
+        DEFAULT_PITCH.format(title=title),
+    )
 
     return APPLICATION_TEMPLATE.format(
+        pitch=pitch,
         title=title,
-        portfolio_url=PORTFOLIO_URL,
+        portfolio_url=portfolio_url,
     )
 
 

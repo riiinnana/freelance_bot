@@ -16,7 +16,12 @@ from filter import (
 from profiles import UserProfile
 
 
-def make_profile(direction_keys, min_budget=1500, strict_mode=True):
+def make_profile(
+    direction_keys,
+    min_budget=1500,
+    strict_mode=True,
+    portfolio_url="https://example.com/portfolio",
+):
     """Профиль пользователя для тестов, без обращения к базе."""
 
     return UserProfile(
@@ -24,6 +29,7 @@ def make_profile(direction_keys, min_budget=1500, strict_mode=True):
         direction_keys=tuple(direction_keys),
         min_budget=min_budget,
         strict_mode=strict_mode,
+        portfolio_url=portfolio_url,
     )
 
 
