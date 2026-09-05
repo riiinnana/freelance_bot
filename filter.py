@@ -1,14 +1,28 @@
+"""Разбор вакансии и примерка её под профиль пользователя.
+
+Проверка разделена на два шага:
+
+* `classify_vacancy` читает текст вакансии и не зависит от пользователя.
+  Результат одинаков для всех, поэтому его достаточно посчитать один раз.
+* `evaluate_for_user` берёт готовый разбор и быстро сверяет его с профилем.
+  Текст вакансии на этом шаге уже не читается.
+"""
+
 import re
 
-from filter_settings import EXCLUDED_KEYWORDS, MIN_PROJECT_BUDGET, WORK_TYPES
+from directions import DIRECTIONS, direction_names
+from filter_settings import UNIVERSAL_STOP_WORDS
 
 
-NUMBER = r"(\d{1,3}(?:[ \u00a0]\d{3})+|\d+)"
+NUMBER = r"(\d{1,3}(?:[  ]\d{3})+|\d+)"
 CURRENCY = r"(?:₽|руб(?:лей|ля|ль)?|р\.)"
+
+# Направление не входит в выбранные, поэтому вакансия ниже в выдаче.
+OFF_PROFILE_PRIORITY = 10 ** 6
 
 
 def _parse_number(value):
-    return int(value.replace(" ", "").replace("\u00a0", ""))
+    return int(value.replace(" ", "").replace(" ", ""))
 
 
 def _find_hours(text):
@@ -90,89 +104,154 @@ def extract_budget(text):
     }
 
 
-def find_work_types(text):
-    """Возвращает подходящие направления и совпавшие ключевые слова."""
+def find_directions(text):
+    """Возвращает ключи найденных направлений и совпавшие ключевые слова."""
 
     text_lower = text.lower()
-    work_types = []
+    direction_keys = []
     matched_keywords = []
 
-    for work_type, keywords in WORK_TYPES.items():
-        matches = [keyword for keyword in keywords if keyword.lower() in text_lower]
+    for direction in DIRECTIONS:
+        matches = [
+            keyword for keyword in direction.keywords if keyword in text_lower
+        ]
         if matches:
-            work_types.append(work_type)
+            direction_keys.append(direction.key)
             matched_keywords.extend(matches)
 
-    return work_types, matched_keywords
+    return direction_keys, matched_keywords
 
 
 def find_stop_words(text):
-    """Возвращает стоп-слова, найденные в тексте вакансии."""
+    """Возвращает универсальные стоп-слова, найденные в тексте вакансии."""
 
     text_lower = text.lower()
-    return [keyword for keyword in EXCLUDED_KEYWORDS if keyword.lower() in text_lower]
+    return [keyword for keyword in UNIVERSAL_STOP_WORDS if keyword in text_lower]
 
 
-def _result(status, suitable, budget, work_types, matched_keywords, stop_words, reason):
+def classify_vacancy(text):
+    """Разбирает вакансию независимо от пользователя.
+
+    Результат можно посчитать один раз при сборе и сохранить: он не зависит
+    от того, кто именно будет смотреть вакансию.
+    """
+
+    direction_keys, matched_keywords = find_directions(text)
+
     return {
-        "status": status,
-        "suitable": suitable,
-        "budget": budget,
-        "work_types": work_types,
+        "budget": extract_budget(text),
+        "direction_keys": direction_keys,
         "matched_keywords": matched_keywords,
-        "matched_stop_words": stop_words,
-        "reason": reason,
+        "matched_stop_words": find_stop_words(text),
     }
 
 
-def analyze_vacancy(text):
-    """Анализирует вакансию и оценивает общую сумму за проект."""
+def _matched_profile_directions(classification, profile):
+    """Возвращает подходящие направления в порядке приоритета пользователя."""
 
-    budget = extract_budget(text)
-    work_types, matched_keywords = find_work_types(text)
-    stop_words = find_stop_words(text)
+    found = set(classification["direction_keys"])
+    return [key for key in profile.direction_keys if key in found]
 
+
+def _result(classification, status, reason_code, reason, profile_keys, priority):
+    return {
+        "status": status,
+        "suitable": status != "red",
+        "reason_code": reason_code,
+        "reason": reason,
+        "budget": classification["budget"],
+        "direction_keys": classification["direction_keys"],
+        "work_types": direction_names(classification["direction_keys"]),
+        "profile_direction_keys": profile_keys,
+        "matched_keywords": classification["matched_keywords"],
+        "matched_stop_words": classification["matched_stop_words"],
+        "off_profile": not profile_keys,
+        "priority": priority,
+    }
+
+
+def evaluate_for_user(classification, profile):
+    """Сверяет готовый разбор вакансии с профилем пользователя."""
+
+    stop_words = classification["matched_stop_words"]
     if stop_words:
         return _result(
-            "red", False, budget, work_types, matched_keywords, stop_words,
+            classification, "red", "stop_words",
             "Неподходящий тип работы: " + ", ".join(stop_words),
+            [], OFF_PROFILE_PRIORITY,
         )
 
-    if not work_types:
+    if not classification["direction_keys"]:
         return _result(
-            "red", False, budget, [], matched_keywords, stop_words,
+            classification, "red", "no_direction",
             "Не найдено подходящее направление дизайна",
+            [], OFF_PROFILE_PRIORITY,
         )
 
+    profile_keys = _matched_profile_directions(classification, profile)
+    priority = (
+        profile.direction_keys.index(profile_keys[0])
+        if profile_keys
+        else OFF_PROFILE_PRIORITY
+    )
+
+    if not profile_keys and profile.strict_mode:
+        return _result(
+            classification, "red", "off_profile_strict",
+            "Направление не входит в твои настройки: "
+            + ", ".join(direction_names(classification["direction_keys"])),
+            profile_keys, priority,
+        )
+
+    budget = classification["budget"]
     maximum = budget["max_amount"]
     minimum = budget["min_amount"]
 
-    if maximum is not None and maximum < MIN_PROJECT_BUDGET:
+    if maximum is not None and maximum < profile.min_budget:
         return _result(
-            "red", False, budget, work_types, matched_keywords, stop_words,
-            f"Сумма за проект ниже {MIN_PROJECT_BUDGET} ₽",
+            classification, "red", "budget_too_low",
+            f"Сумма за проект ниже {profile.min_budget} ₽",
+            profile_keys, priority,
         )
 
-    if minimum is not None and minimum < MIN_PROJECT_BUDGET:
+    if minimum is not None and minimum < profile.min_budget:
         return _result(
-            "yellow", True, budget, work_types, matched_keywords, stop_words,
-            f"Сумма за проект может быть ниже {MIN_PROJECT_BUDGET} ₽",
+            classification, "yellow", "budget_may_be_low",
+            f"Сумма за проект может быть ниже {profile.min_budget} ₽",
+            profile_keys, priority,
         )
 
     if budget["payment_type"] == "hourly" and budget["hours"] is None:
         return _result(
-            "yellow", True, budget, work_types, matched_keywords, stop_words,
+            classification, "yellow", "hours_unknown",
             "Указана почасовая ставка, но не указано количество часов",
+            profile_keys, priority,
         )
 
     if maximum is None:
         return _result(
-            "yellow", True, budget, work_types, matched_keywords, stop_words,
+            classification, "yellow", "budget_unknown",
             "Подходящее направление, но сумма за проект не указана",
+            profile_keys, priority,
+        )
+
+    if not profile_keys:
+        return _result(
+            classification, "yellow", "off_profile",
+            "Подходит по сумме, но это не твоё основное направление: "
+            + ", ".join(direction_names(classification["direction_keys"])),
+            profile_keys, priority,
         )
 
     return _result(
-        "green", True, budget, work_types, matched_keywords, stop_words,
+        classification, "green", "match",
         "Подходит по сумме за проект; подходит по направлению: "
-        + ", ".join(work_types),
+        + ", ".join(direction_names(profile_keys)),
+        profile_keys, priority,
     )
+
+
+def analyze_vacancy(text, profile):
+    """Разбирает вакансию и сразу примеряет её под профиль пользователя."""
+
+    return evaluate_for_user(classify_vacancy(text), profile)

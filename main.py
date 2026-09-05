@@ -5,6 +5,8 @@ import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -18,8 +20,9 @@ from dotenv import load_dotenv
 from applications import build_application_text, build_chat_link, extract_contact_username
 from config import PORTFOLIO_URL
 from collectors.telegram_channel import fetch_all_channel_posts
+from directions import DIRECTIONS, direction_names
 from filter import analyze_vacancy
-from filter_settings import MIN_PROJECT_BUDGET, WORK_TYPES
+from profiles import MAX_ALLOWED_BUDGET, MIN_ALLOWED_BUDGET, ProfileRepository
 from rejections import RejectionRepository
 from source_settings import (
     COLLECTOR_POST_LIMIT,
@@ -45,6 +48,19 @@ bot = Bot(
 
 dp = Dispatcher()
 rejection_repository = RejectionRepository("data/rejections.db")
+profile_repository = ProfileRepository("data/rejections.db")
+
+# Вакансии, которые попадают в выдачу: точное совпадение с профилем и —
+# при выключенном строгом режиме — смежные направления.
+SHOWN_REASON_CODES = {"match", "off_profile"}
+
+# Каналы-источники: их упоминания в конце поста — это подпись канала,
+# а не контакт заказчика.
+CHANNEL_USERNAMES = [channel["username"] for channel in TELEGRAM_CHANNELS]
+
+
+class SettingsStates(StatesGroup):
+    waiting_for_budget = State()
 
 
 # Главное меню
@@ -85,6 +101,85 @@ def format_budget(budget):
     return "не указана"
 
 
+def build_settings_text(profile):
+    """Собирает описание текущих настроек поиска."""
+
+    if profile.direction_keys:
+        chosen = "\n".join(
+            f"{position}. {escape(name)}"
+            for position, name in enumerate(
+                direction_names(profile.direction_keys), start=1
+            )
+        )
+        directions_block = (
+            f"<b>Твои направления</b> (в порядке важности):\n{chosen}"
+        )
+    else:
+        directions_block = (
+            "<b>Твои направления:</b> пока не выбраны.\n"
+            "Отметь хотя бы одно — без этого поиск не заработает."
+        )
+
+    strict_block = (
+        "Показываю только выбранные направления."
+        if profile.strict_mode
+        else "Показываю и смежные направления, но в конце списка."
+    )
+
+    return (
+        "⚙️ <b>Настройки поиска</b>\n\n"
+        f"{directions_block}\n\n"
+        f"<b>Минимальная сумма за проект:</b> {profile.min_budget} ₽\n"
+        f"<b>Строгий режим:</b> {strict_block}\n\n"
+        f"<b>Портфолио:</b>\n{escape(PORTFOLIO_URL)}"
+    )
+
+
+def build_settings_keyboard(profile):
+    """Собирает клавиатуру настроек с галочками направлений."""
+
+    rows = []
+    for direction in DIRECTIONS:
+        mark = "✅" if direction.key in profile.direction_keys else "⬜"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{mark} {direction.name}",
+                    callback_data=f"dir:{direction.key}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"💰 Минимальная сумма: {profile.min_budget} ₽",
+                callback_data="settings:budget",
+            )
+        ]
+    )
+
+    strict_label = "включён" if profile.strict_mode else "выключен"
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"🎯 Строгий режим: {strict_label}",
+                callback_data="settings:strict",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_settings(message, profile):
+    await message.answer(
+        build_settings_text(profile),
+        parse_mode="HTML",
+        reply_markup=build_settings_keyboard(profile),
+    )
+
+
 def format_collected_vacancy(post, result):
     """Создаёт компактное сообщение с результатом анализа публикации."""
 
@@ -97,7 +192,7 @@ def format_collected_vacancy(post, result):
         f"<b>Источник:</b> {escape(post.source)}\n"
         f"<b>Направления:</b> {escape(directions)}\n"
         f"<b>Причина:</b> {escape(result['reason'])}\n\n"
-        f"<a href=\"{post.url}\">Открыть публикацию в канале</a>"
+        f"<a href=\"{escape(post.url, quote=True)}\">Открыть публикацию в канале</a>"
     )
 
 
@@ -105,7 +200,9 @@ def candidate_score(post, result, contact_username):
     """Оценивает релевантность вакансии для выдачи первой."""
 
     return (
+        not result["off_profile"],
         contact_username is not None,
+        -result["priority"],
         len(result["matched_keywords"]),
         result["budget"]["max_amount"] or 0,
         post.published_at or "",
@@ -114,6 +211,16 @@ def candidate_score(post, result, contact_username):
 
 async def show_best_vacancy(message, user_id):
     """Находит и отправляет одну лучшую ещё не отклонённую вакансию."""
+
+    profile = profile_repository.get(user_id)
+
+    if not profile.is_configured:
+        await message.answer(
+            "Сначала выбери направления, которые тебе интересны — "
+            "иначе я не знаю, что искать."
+        )
+        await send_settings(message, profile)
+        return
 
     try:
         posts, unavailable_channels = await fetch_all_channel_posts(
@@ -132,11 +239,15 @@ async def show_best_vacancy(message, user_id):
         if rejection_repository.is_rejected(user_id, post.source_id):
             continue
 
-        result = analyze_vacancy(post.description)
-        if result["status"] != "green":
+        result = analyze_vacancy(post.description, profile)
+        if result["reason_code"] not in SHOWN_REASON_CODES:
             continue
 
-        contact_username = extract_contact_username(post.description)
+        contact_username = extract_contact_username(
+            post.description,
+            source_username=post.source,
+            excluded_usernames=CHANNEL_USERNAMES,
+        )
         candidates.append((post, result, contact_username))
 
     if not candidates:
@@ -195,7 +306,20 @@ async def show_best_vacancy(message, user_id):
 
 
 @dp.message(Command("start"))
-async def start_command(message: Message):
+async def start_command(message: Message, state: FSMContext):
+    await state.clear()
+    profile = profile_repository.get(message.from_user.id)
+
+    if not profile.is_configured:
+        await message.answer(
+            "Привет! Я помогаю искать фриланс-вакансии по дизайну.\n\n"
+            "Чтобы я показывал только нужное, отметь свои направления. "
+            "Порядок важен: что отметишь первым, то и будет выше в выдаче.",
+            reply_markup=main_menu,
+        )
+        await send_settings(message, profile)
+        return
+
     await message.answer(
         "Привет! Я твой помощник по поиску фриланс-вакансий.\n\n"
         "Выбери нужное действие:",
@@ -203,8 +327,37 @@ async def start_command(message: Message):
     )
 
 
+@dp.message(SettingsStates.waiting_for_budget)
+async def set_budget(message: Message, state: FSMContext):
+    raw_amount = (message.text or "").replace(" ", "").replace(" ", "")
+
+    if not raw_amount.isdigit():
+        await message.answer(
+            "Нужно число без букв и знаков, например: 5000.\n"
+            "Отправь сумму ещё раз или нажми /start, чтобы выйти."
+        )
+        return
+
+    amount = int(raw_amount)
+    if not MIN_ALLOWED_BUDGET <= amount <= MAX_ALLOWED_BUDGET:
+        await message.answer(
+            f"Сумма должна быть от {MIN_ALLOWED_BUDGET} "
+            f"до {MAX_ALLOWED_BUDGET} ₽. Отправь другое число."
+        )
+        return
+
+    profile_repository.set_min_budget(message.from_user.id, amount)
+    await state.clear()
+
+    profile = profile_repository.get(message.from_user.id)
+    await message.answer(f"Готово, минимальная сумма теперь {amount} ₽.")
+    await send_settings(message, profile)
+
+
 @dp.message()
 async def handle_buttons(message: Message):
+    profile = profile_repository.get(message.from_user.id)
+
     if message.text == "🔎 Найти вакансии":
         await message.answer("🔎 Ищу лучшую подходящую вакансию...")
         await show_best_vacancy(message, message.from_user.id)
@@ -215,22 +368,10 @@ async def handle_buttons(message: Message):
         )
 
     elif message.text == "⚙️ Настройки":
-        work_types = "\n".join(
-            f"• {work_type}" for work_type in WORK_TYPES
-        )
-
-        await message.answer(
-            f"⚙️ <b>Твои настройки поиска</b>\n\n"
-            f"<b>Минимальная сумма за проект:</b> {MIN_PROJECT_BUDGET} ₽\n\n"
-            f"<b>Подходящие направления:</b>\n"
-            f"{work_types}\n\n"
-            f"<b>Портфолио:</b>\n"
-            f"{PORTFOLIO_URL}",
-            parse_mode="HTML"
-        )
+        await send_settings(message, profile)
 
     else:
-        result = analyze_vacancy(message.text)
+        result = analyze_vacancy(message.text, profile)
 
         status_icons = {
             "green": "🟢",
@@ -259,6 +400,56 @@ async def handle_buttons(message: Message):
             ,
             parse_mode="HTML"
         )
+
+
+@dp.callback_query(F.data.startswith("dir:"))
+async def toggle_direction(callback: CallbackQuery):
+    direction_key = callback.data.removeprefix("dir:")
+
+    try:
+        is_selected = profile_repository.toggle_direction(
+            callback.from_user.id, direction_key
+        )
+    except ValueError:
+        await callback.answer("Это направление больше недоступно")
+        return
+
+    await callback.answer("Направление добавлено" if is_selected else "Направление убрано")
+
+    profile = profile_repository.get(callback.from_user.id)
+    await callback.message.edit_text(
+        build_settings_text(profile),
+        parse_mode="HTML",
+        reply_markup=build_settings_keyboard(profile),
+    )
+
+
+@dp.callback_query(F.data == "settings:strict")
+async def toggle_strict_mode(callback: CallbackQuery):
+    profile = profile_repository.get(callback.from_user.id)
+    profile_repository.set_strict_mode(
+        callback.from_user.id, not profile.strict_mode
+    )
+
+    await callback.answer(
+        "Строгий режим выключен" if profile.strict_mode else "Строгий режим включён"
+    )
+
+    profile = profile_repository.get(callback.from_user.id)
+    await callback.message.edit_text(
+        build_settings_text(profile),
+        parse_mode="HTML",
+        reply_markup=build_settings_keyboard(profile),
+    )
+
+
+@dp.callback_query(F.data == "settings:budget")
+async def ask_budget(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsStates.waiting_for_budget)
+    await callback.answer()
+    await callback.message.answer(
+        "Отправь минимальную сумму за проект в рублях, например: 5000."
+    )
 
 
 @dp.callback_query(F.data.startswith("reject:"))
