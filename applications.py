@@ -1,11 +1,14 @@
 """Подготовка контакта и ссылки с черновиком отклика."""
 
+import hashlib
 import re
 from urllib.parse import quote
 
 from application_settings import (
     APPLICATION_TEMPLATE,
-    DEFAULT_PITCH,
+    CLOSINGS,
+    DEFAULT_PITCHES,
+    GREETINGS,
     PITCH_BY_DIRECTION,
 )
 
@@ -92,7 +95,28 @@ def extract_contact_username(text, source_username=None, excluded_usernames=()):
     return candidates[-1][1]
 
 
-def build_application_text(title, portfolio_url, direction_keys=()):
+def _pick(options, seed, salt):
+    """Выбирает вариант по вакансии, а не случайно.
+
+    Один и тот же пост всегда даёт один и тот же текст, поэтому черновик
+    не меняется, если вернуться к вакансии позже. Разные вакансии при этом
+    получают разные формулировки, и отклики не выглядят копипастой.
+
+    `salt` разводит части текста: приветствие и завершение выбираются
+    независимо друг от друга, иначе варианты ходили бы парами.
+    """
+
+    options = tuple(options)
+    if not options:
+        raise ValueError("Список вариантов пуст")
+
+    digest = hashlib.blake2b(
+        (salt + chr(31) + str(seed)).encode("utf-8"), digest_size=8
+    ).digest()
+    return options[int.from_bytes(digest, "big") % len(options)]
+
+
+def build_application_text(title, portfolio_url, direction_keys=(), seed=""):
     """Создаёт редактируемый черновик отклика.
 
     Фраза подбирается под то направление вакансии, которое стоит у
@@ -103,19 +127,28 @@ def build_application_text(title, portfolio_url, direction_keys=()):
     захочется генерировать его моделью, менять нужно только эту функцию.
     """
 
-    pitch = next(
+    seed = seed or title
+
+    pitches = next(
         (
             PITCH_BY_DIRECTION[key]
             for key in direction_keys
             if key in PITCH_BY_DIRECTION
         ),
-        DEFAULT_PITCH.format(title=title),
+        None,
     )
 
+    if pitches is None:
+        pitch = _pick(DEFAULT_PITCHES, seed, "pitch").format(title=title)
+    else:
+        pitch = _pick(pitches, seed, "pitch")
+
     return APPLICATION_TEMPLATE.format(
+        greeting=_pick(GREETINGS, seed, "greeting"),
         pitch=pitch,
         title=title,
         portfolio_url=portfolio_url,
+        closing=_pick(CLOSINGS, seed, "closing"),
     )
 
 

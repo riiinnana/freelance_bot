@@ -82,6 +82,30 @@ class ApplicationTests(unittest.TestCase):
 
         self.assertIn("https://behance.net/me", draft)
 
+    def test_same_vacancy_always_gives_the_same_draft(self):
+        first = build_application_text(
+            "Карточки для WB", "https://example.com/p", ("product_cards",),
+            seed="design_vacancy/3114",
+        )
+        second = build_application_text(
+            "Карточки для WB", "https://example.com/p", ("product_cards",),
+            seed="design_vacancy/3114",
+        )
+
+        self.assertEqual(first, second)
+
+    def test_different_vacancies_do_not_all_get_the_same_text(self):
+        drafts = {
+            build_application_text(
+                "Карточки товаров", "https://example.com/p", ("product_cards",),
+                seed=f"channel/{number}",
+            )
+            for number in range(12)
+        }
+
+        # Двенадцать вакансий одного направления не должны дать один текст.
+        self.assertGreater(len(drafts), 1)
+
     def test_draft_mentions_the_actual_kind_of_work(self):
         cards = build_application_text(
             "Карточки для WB", "https://example.com/p", ("product_cards",)

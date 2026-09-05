@@ -377,6 +377,7 @@ async def show_best_vacancy(message, user_id):
             post.title,
             profile.portfolio_url,
             result["profile_direction_keys"] or result["direction_keys"],
+            seed=post.source_id,
         )
         buttons.append(
             [
