@@ -10,8 +10,10 @@
 
 import re
 
+from commitment import ANY, commitment_name, detect_commitment
 from directions import DIRECTIONS, direction_names
 from filter_settings import UNIVERSAL_STOP_WORDS
+from keywords import compile_keywords, find_matches
 
 
 NUMBER = r"(\d{1,3}(?:[  ]\d{3})+|\d+)"
@@ -21,38 +23,13 @@ CURRENCY = r"(?:₽|руб(?:лей|ля|ль)?|р\.)"
 OFF_PROFILE_PRIORITY = 10 ** 6
 
 
-def _compile_keyword(keyword):
-    """Собирает шаблон поиска ключевого слова.
-
-    Звёздочка означает «и любое окончание», поэтому `"презентаци*"` найдёт
-    и презентацию, и презентаций. Поиск всегда начинается с начала слова, а
-    слово без звёздочки должно совпасть целиком — так «моушн» перестаёт
-    находиться в середине постороннего слова.
-    """
-
-    parts = [re.escape(part) for part in keyword.split("*")]
-    pattern = r"\b" + r"\w*".join(parts)
-    if not keyword.endswith("*"):
-        pattern += r"\b"
-    return re.compile(pattern, re.IGNORECASE)
-
-
-def _compile_keywords(keywords):
-    """Возвращает пары «слово для показа — шаблон поиска»."""
-
-    return tuple(
-        (keyword.replace("*", ""), _compile_keyword(keyword))
-        for keyword in keywords
-    )
-
-
 # Шаблоны собираются один раз при загрузке модуля, а не на каждую вакансию.
 _DIRECTION_PATTERNS = tuple(
-    (direction, _compile_keywords(direction.keywords))
+    (direction, compile_keywords(direction.keywords))
     for direction in DIRECTIONS
 )
 
-_STOP_WORD_PATTERNS = _compile_keywords(UNIVERSAL_STOP_WORDS)
+_STOP_WORD_PATTERNS = compile_keywords(UNIVERSAL_STOP_WORDS)
 
 
 def _parse_number(value):
@@ -145,9 +122,7 @@ def find_directions(text):
     matched_keywords = []
 
     for direction, patterns in _DIRECTION_PATTERNS:
-        matches = [
-            keyword for keyword, pattern in patterns if pattern.search(text)
-        ]
+        matches = find_matches(text, patterns)
         if matches:
             direction_keys.append(direction.key)
             matched_keywords.extend(matches)
@@ -158,10 +133,7 @@ def find_directions(text):
 def find_stop_words(text):
     """Возвращает универсальные стоп-слова, найденные в тексте вакансии."""
 
-    return [
-        keyword for keyword, pattern in _STOP_WORD_PATTERNS
-        if pattern.search(text)
-    ]
+    return find_matches(text, _STOP_WORD_PATTERNS)
 
 
 def classify_vacancy(text):
@@ -175,10 +147,24 @@ def classify_vacancy(text):
 
     return {
         "budget": extract_budget(text),
+        "commitment": detect_commitment(text),
         "direction_keys": direction_keys,
         "matched_keywords": matched_keywords,
         "matched_stop_words": find_stop_words(text),
     }
+
+
+# Ключи, которые должен содержать свежий разбор. По ним видно, что
+# сохранённая вакансия разбиралась старой версией и требует пересчёта.
+CLASSIFICATION_KEYS = frozenset(
+    {
+        "budget",
+        "commitment",
+        "direction_keys",
+        "matched_keywords",
+        "matched_stop_words",
+    }
+)
 
 
 def _matched_profile_directions(classification, profile):
@@ -195,6 +181,8 @@ def _result(classification, status, reason_code, reason, profile_keys, priority)
         "reason_code": reason_code,
         "reason": reason,
         "budget": classification["budget"],
+        # У вакансий, разобранных прошлой версией, ключа может не быть.
+        "commitment": classification.get("commitment"),
         "direction_keys": classification["direction_keys"],
         "work_types": direction_names(classification["direction_keys"]),
         "profile_direction_keys": profile_keys,
@@ -238,9 +226,35 @@ def evaluate_for_user(classification, profile):
             profile_keys, priority,
         )
 
+    # Формат работы проверяется до денег: это предпочтение о том, во что
+    # вообще ввязываться. Неопределённый формат проходит дальше — прямо о
+    # длительности пишут редко, и прятать такие вакансии нельзя.
+    commitment = classification.get("commitment")
+    if (
+        profile.commitment != ANY
+        and commitment is not None
+        and commitment != profile.commitment
+    ):
+        return _result(
+            classification, "red", "wrong_commitment",
+            "Не тот формат работы: " + commitment_name(commitment),
+            profile_keys, priority,
+        )
+
     budget = classification["budget"]
     maximum = budget["max_amount"]
     minimum = budget["min_amount"]
+
+    if (
+        profile.max_budget
+        and minimum is not None
+        and minimum > profile.max_budget
+    ):
+        return _result(
+            classification, "red", "budget_too_high",
+            f"Сумма за проект выше {profile.max_budget} ₽",
+            profile_keys, priority,
+        )
 
     if maximum is not None and maximum < profile.min_budget:
         return _result(

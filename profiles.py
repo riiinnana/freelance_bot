@@ -5,6 +5,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from commitment import ANY, COMMITMENTS
 from directions import DIRECTION_BY_KEY
 from config import DEFAULT_PORTFOLIO_URL
 from filter_settings import DEFAULT_MIN_BUDGET
@@ -16,6 +17,12 @@ DEFAULT_STRICT_MODE = True
 
 MIN_ALLOWED_BUDGET = 0
 MAX_ALLOWED_BUDGET = 10_000_000
+
+# Ноль означает «потолок не задан»: верхней границы нет.
+NO_MAX_BUDGET = 0
+
+# По умолчанию формат работы неважен.
+DEFAULT_COMMITMENT = ANY
 
 
 def is_valid_portfolio_url(url):
@@ -42,6 +49,8 @@ class UserProfile:
     min_budget: int
     strict_mode: bool
     portfolio_url: str
+    max_budget: int = NO_MAX_BUDGET
+    commitment: str = DEFAULT_COMMITMENT
 
     @property
     def is_configured(self):
@@ -52,6 +61,10 @@ class UserProfile:
     @property
     def has_portfolio(self):
         return bool(self.portfolio_url)
+
+    @property
+    def has_max_budget(self):
+        return self.max_budget > NO_MAX_BUDGET
 
 
 class ProfileRepository:
@@ -65,7 +78,9 @@ class ProfileRepository:
                     user_id       INTEGER PRIMARY KEY,
                     min_budget    INTEGER NOT NULL,
                     strict_mode   INTEGER NOT NULL DEFAULT 1,
-                    portfolio_url TEXT NOT NULL DEFAULT ''
+                    portfolio_url TEXT NOT NULL DEFAULT '',
+                    max_budget    INTEGER NOT NULL DEFAULT 0,
+                    commitment    TEXT NOT NULL DEFAULT 'any'
                 )
                 """
             )
@@ -105,6 +120,18 @@ class ProfileRepository:
                 "ADD COLUMN portfolio_url TEXT NOT NULL DEFAULT ''"
             )
 
+        if "max_budget" not in existing:
+            connection.execute(
+                "ALTER TABLE user_profiles "
+                "ADD COLUMN max_budget INTEGER NOT NULL DEFAULT 0"
+            )
+
+        if "commitment" not in existing:
+            connection.execute(
+                "ALTER TABLE user_profiles "
+                "ADD COLUMN commitment TEXT NOT NULL DEFAULT 'any'"
+            )
+
     def _ensure_profile(self, connection, user_id):
         connection.execute(
             """
@@ -126,8 +153,15 @@ class ProfileRepository:
         with closing(self._connect()) as connection:
             self._ensure_profile(connection, user_id)
 
-            min_budget, strict_mode, portfolio_url = connection.execute(
-                "SELECT min_budget, strict_mode, portfolio_url "
+            (
+                min_budget,
+                strict_mode,
+                portfolio_url,
+                max_budget,
+                commitment,
+            ) = connection.execute(
+                "SELECT min_budget, strict_mode, portfolio_url, "
+                "max_budget, commitment "
                 "FROM user_profiles WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
@@ -153,6 +187,8 @@ class ProfileRepository:
             min_budget=min_budget,
             strict_mode=bool(strict_mode),
             portfolio_url=portfolio_url or "",
+            max_budget=max_budget,
+            commitment=commitment,
         )
 
     def toggle_direction(self, user_id, direction_key):
@@ -224,6 +260,32 @@ class ProfileRepository:
             connection.execute(
                 "UPDATE user_profiles SET portfolio_url = ? WHERE user_id = ?",
                 (url, user_id),
+            )
+
+    def set_max_budget(self, user_id, amount):
+        """Сохраняет потолок суммы. Ноль снимает ограничение."""
+
+        if not MIN_ALLOWED_BUDGET <= amount <= MAX_ALLOWED_BUDGET:
+            raise ValueError("Сумма вне допустимого диапазона")
+
+        with closing(self._connect()) as connection:
+            self._ensure_profile(connection, user_id)
+            connection.execute(
+                "UPDATE user_profiles SET max_budget = ? WHERE user_id = ?",
+                (amount, user_id),
+            )
+
+    def set_commitment(self, user_id, commitment):
+        """Сохраняет предпочтение по формату работы."""
+
+        if commitment != ANY and commitment not in COMMITMENTS:
+            raise ValueError(f"Неизвестный формат работы: {commitment}")
+
+        with closing(self._connect()) as connection:
+            self._ensure_profile(connection, user_id)
+            connection.execute(
+                "UPDATE user_profiles SET commitment = ? WHERE user_id = ?",
+                (commitment, user_id),
             )
 
     def set_strict_mode(self, user_id, enabled):

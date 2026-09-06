@@ -20,7 +20,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-from filter import classify_vacancy
+from filter import CLASSIFICATION_KEYS, classify_vacancy
 
 
 # Ссылки и упоминания в сравнении не участвуют: у копий они всегда разные.
@@ -247,6 +247,37 @@ class VacancyRepository:
             return connection.execute(
                 "SELECT COUNT(*) FROM vacancies"
             ).fetchone()[0]
+
+    def reclassify_outdated(self):
+        """Пересчитывает разбор там, где он собран прошлой версией.
+
+        Разбор лежит в базе готовым, поэтому новое поле (например, формат
+        работы) к старым записям само не появится.
+        """
+
+        outdated = []
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT source_id, description, classification FROM vacancies"
+            ).fetchall()
+
+            for source_id, description, classification in rows:
+                if CLASSIFICATION_KEYS <= set(json.loads(classification)):
+                    continue
+                outdated.append((source_id, description))
+
+            for source_id, description in outdated:
+                connection.execute(
+                    "UPDATE vacancies SET classification = ? WHERE source_id = ?",
+                    (
+                        json.dumps(
+                            classify_vacancy(description), ensure_ascii=False
+                        ),
+                        source_id,
+                    ),
+                )
+
+        return len(outdated)
 
     def reclassify_all(self):
         """Пересчитывает разбор по сохранённым текстам.

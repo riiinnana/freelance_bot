@@ -4,8 +4,9 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
+from commitment import ANY, ONE_OFF
 from filter_settings import DEFAULT_MIN_BUDGET
-from profiles import ProfileRepository
+from profiles import NO_MAX_BUDGET, ProfileRepository
 
 
 class ProfileRepositoryTests(unittest.TestCase):
@@ -55,6 +56,33 @@ class ProfileRepositoryTests(unittest.TestCase):
         self.repository.set_strict_mode(100, False)
 
         self.assertFalse(self.repository.get(100).strict_mode)
+
+    def test_new_profile_has_no_ceiling_and_any_format(self):
+        profile = self.repository.get(100)
+
+        self.assertEqual(profile.max_budget, NO_MAX_BUDGET)
+        self.assertFalse(profile.has_max_budget)
+        self.assertEqual(profile.commitment, ANY)
+
+    def test_ceiling_and_format_are_saved(self):
+        self.repository.set_max_budget(100, 80000)
+        self.repository.set_commitment(100, ONE_OFF)
+
+        profile = self.repository.get(100)
+
+        self.assertEqual(profile.max_budget, 80000)
+        self.assertTrue(profile.has_max_budget)
+        self.assertEqual(profile.commitment, ONE_OFF)
+
+    def test_zero_removes_the_ceiling(self):
+        self.repository.set_max_budget(100, 80000)
+        self.repository.set_max_budget(100, NO_MAX_BUDGET)
+
+        self.assertFalse(self.repository.get(100).has_max_budget)
+
+    def test_unknown_format_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.repository.set_commitment(100, "когда-нибудь")
 
     def test_unknown_direction_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -129,6 +157,8 @@ class ProfileMigrationTests(unittest.TestCase):
             self.assertFalse(profile.strict_mode)
             self.assertEqual(profile.direction_keys, ("banners",))
             self.assertEqual(profile.portfolio_url, "")
+            self.assertEqual(profile.max_budget, NO_MAX_BUDGET)
+            self.assertEqual(profile.commitment, ANY)
 
 
 if __name__ == "__main__":

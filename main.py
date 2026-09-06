@@ -19,6 +19,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 from applications import build_application_text, build_chat_link, extract_contact_username
+from commitment import ANY, ONE_OFF, ONGOING, commitment_label, commitment_name
 from collectors.telegram_channel import fetch_all_channel_posts
 from directions import (
     DIRECTION_BY_KEY,
@@ -33,6 +34,7 @@ from vacancies import VacancyRepository
 from profiles import (
     MAX_ALLOWED_BUDGET,
     MIN_ALLOWED_BUDGET,
+    NO_MAX_BUDGET,
     ProfileRepository,
 )
 from vacancy_actions import (
@@ -105,7 +107,18 @@ def remember_chat_link(user_id, source_id, chat_url):
 
 class SettingsStates(StatesGroup):
     waiting_for_budget = State()
+    waiting_for_max_budget = State()
     waiting_for_portfolio = State()
+
+
+# Кнопка формата работы перебирает варианты по кругу.
+COMMITMENT_CYCLE = {ANY: ONE_OFF, ONE_OFF: ONGOING, ONGOING: ANY}
+
+COMMITMENT_BUTTON_LABELS = {
+    ANY: "любой",
+    ONE_OFF: "только разовые",
+    ONGOING: "только долгосрок",
+}
 
 
 # Главное меню
@@ -171,6 +184,16 @@ def build_settings_text(profile):
         else "Показываю и смежные направления, но в конце списка."
     )
 
+    budget_block = f"от {profile.min_budget} ₽"
+    if profile.has_max_budget:
+        budget_block += f" до {profile.max_budget} ₽"
+
+    commitment_block = {
+        ANY: "любой",
+        ONE_OFF: "только разовые задачи",
+        ONGOING: "только постоянное сотрудничество",
+    }[profile.commitment]
+
     portfolio_block = (
         escape(profile.portfolio_url)
         if profile.has_portfolio
@@ -180,7 +203,8 @@ def build_settings_text(profile):
     return (
         "⚙️ <b>Настройки поиска</b>\n\n"
         f"{directions_block}\n\n"
-        f"<b>Минимальная сумма за проект:</b> {profile.min_budget} ₽\n"
+        f"<b>Сумма за проект:</b> {budget_block}\n"
+        f"<b>Формат работы:</b> {commitment_block}\n"
         f"<b>Строгий режим:</b> {strict_block}\n\n"
         f"<b>Портфолио:</b>\n{portfolio_block}"
     )
@@ -216,8 +240,28 @@ def build_settings_keyboard(profile):
     rows.append(
         [
             InlineKeyboardButton(
-                text=f"💰 Минимальная сумма: {profile.min_budget} ₽",
+                text=f"💰 От: {profile.min_budget} ₽",
                 callback_data="settings:budget",
+            ),
+            InlineKeyboardButton(
+                text=(
+                    f"💸 До: {profile.max_budget} ₽"
+                    if profile.has_max_budget
+                    else "💸 До: без потолка"
+                ),
+                callback_data="settings:maxbudget",
+            ),
+        ]
+    )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=(
+                    "⏳ Формат работы: "
+                    + COMMITMENT_BUTTON_LABELS[profile.commitment]
+                ),
+                callback_data="settings:commitment",
             )
         ]
     )
@@ -323,9 +367,13 @@ def format_collected_vacancy(post, result):
     status_icons = {"green": "🟢", "yellow": "🟡"}
     directions = ", ".join(result["work_types"])
 
+    label = commitment_label(result.get("commitment"))
+    commitment_line = f"<b>Формат:</b> {label}' + NL + '" if label else ""
+
     return (
         f"{status_icons[result['status']]} <b>{escape(post.title)}</b>\n\n"
         f"<b>Бюджет:</b> {escape(format_budget(result['budget']))}\n"
+        f"{commitment_line}"
         f"<b>Источник:</b> {escape(post.source)}\n"
         f"<b>Направления:</b> {escape(directions)}\n"
         f"<b>Причина:</b> {escape(result['reason'])}\n\n"
@@ -557,6 +605,49 @@ async def set_portfolio(message: Message, state: FSMContext):
     await send_settings(message, profile)
 
 
+@dp.message(SettingsStates.waiting_for_max_budget)
+async def set_max_budget(message: Message, state: FSMContext):
+    raw_amount = (message.text or "").replace(" ", "").replace(chr(160), "")
+
+    if raw_amount in ("0", "-", "без потолка"):
+        profile_repository.set_max_budget(message.from_user.id, NO_MAX_BUDGET)
+        await state.clear()
+        await message.answer("Готово, потолок снят.")
+        await send_settings(
+            message, profile_repository.get(message.from_user.id)
+        )
+        return
+
+    if not raw_amount.isdigit():
+        await message.answer(
+            "Нужно число без букв и знаков, например: 80000.\n"
+            "Отправь 0, чтобы снять потолок, или /start, чтобы выйти."
+        )
+        return
+
+    amount = int(raw_amount)
+    profile = profile_repository.get(message.from_user.id)
+
+    if amount < profile.min_budget:
+        await message.answer(
+            f"Потолок не может быть ниже минимальной суммы "
+            f"({profile.min_budget} ₽). Отправь число побольше."
+        )
+        return
+
+    try:
+        profile_repository.set_max_budget(message.from_user.id, amount)
+    except ValueError:
+        await message.answer(
+            f"Сумма должна быть не больше {MAX_ALLOWED_BUDGET} ₽."
+        )
+        return
+
+    await state.clear()
+    await message.answer(f"Готово, потолок теперь {amount} ₽.")
+    await send_settings(message, profile_repository.get(message.from_user.id))
+
+
 @dp.message()
 async def handle_buttons(message: Message):
     if not message.text:
@@ -717,6 +808,36 @@ async def ask_portfolio(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@dp.callback_query(F.data == "settings:maxbudget")
+async def ask_max_budget(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsStates.waiting_for_max_budget)
+    await callback.answer()
+    await callback.message.answer(
+        "Отправь максимальную сумму за проект в рублях — вакансии дороже показываться не будут.\n"
+        "Например: 80000. Отправь 0, чтобы снять потолок."
+    )
+
+
+@dp.callback_query(F.data == "settings:commitment")
+async def switch_commitment(callback: CallbackQuery):
+    """Перебирает форматы работы по кругу: любой, разовые, долгосрок."""
+
+    profile = profile_repository.get(callback.from_user.id)
+    next_commitment = COMMITMENT_CYCLE[profile.commitment]
+    profile_repository.set_commitment(callback.from_user.id, next_commitment)
+
+    await callback.answer(
+        "Формат работы: " + COMMITMENT_BUTTON_LABELS[next_commitment]
+    )
+
+    profile = profile_repository.get(callback.from_user.id)
+    await callback.message.edit_text(
+        build_settings_text(profile),
+        parse_mode="HTML",
+        reply_markup=build_settings_keyboard(profile),
+    )
+
+
 @dp.callback_query(F.data == "settings:budget")
 async def ask_budget(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SettingsStates.waiting_for_budget)
@@ -784,6 +905,10 @@ async def reject_vacancy(callback: CallbackQuery):
 
 async def main():
     logger.info("Бот запускается")
+
+    outdated = vacancy_repository.reclassify_outdated()
+    if outdated:
+        logger.info("Пересчитан разбор у %d сохранённых вакансий", outdated)
 
     try:
         await dp.start_polling(bot)
