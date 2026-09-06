@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from applications import build_application_text, build_chat_link, extract_contact_username
 from commitment import ANY, ONE_OFF, ONGOING, commitment_label, commitment_name
-from collectors.telegram_channel import fetch_all_channel_posts
+from collection import run_collection_loop
 from directions import (
     DIRECTION_BY_KEY,
     GROUPS,
@@ -45,7 +45,9 @@ from vacancy_actions import (
     VacancyActionRepository,
 )
 from source_settings import (
+    COLLECTION_INTERVAL_MINUTES,
     COLLECTOR_POST_LIMIT,
+    FIRST_COLLECTION_DELAY_SECONDS,
     TELEGRAM_CHANNELS,
 )
 
@@ -417,28 +419,14 @@ async def show_best_vacancy(message, user_id):
         await send_settings(message, profile)
         return
 
-    unavailable_channels = []
-    try:
-        posts, unavailable_channels = await fetch_all_channel_posts(
-            TELEGRAM_CHANNELS,
-            limit=COLLECTOR_POST_LIMIT,
-            proxy=PROXY_URL,
+    # В сеть здесь не ходим: каналы обходит фоновый сбор, один раз для
+    # всех пользователей. Выдача читает только базу и отвечает сразу.
+    if not vacancy_repository.count():
+        await message.answer(
+            "Ещё собираю вакансии — это первый заход после запуска. "
+            "Загляни через пару минут."
         )
-    except Exception:
-        logger.exception("Не удалось получить вакансии из каналов")
-        # Сеть могла отвалиться, но в базе уже что-то лежит — покажем оттуда.
-        if not vacancy_repository.count():
-            await message.answer(
-                "Не удалось получить вакансии. Проверь подключение к сети "
-                "и повтори попытку позже."
-            )
-            return
-    else:
-        added, duplicates = vacancy_repository.save_posts(posts)
-        logger.info(
-            "Собрано публикаций: %d, новых: %d, повторов: %d",
-            len(posts), added, duplicates,
-        )
+        return
 
     actions = action_repository.actions_for_user(user_id)
 
@@ -524,12 +512,6 @@ async def show_best_vacancy(message, user_id):
         disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
-
-    if unavailable_channels:
-        await message.answer(
-            "Часть источников недоступна: "
-            + ", ".join(f"@{username}" for username in unavailable_channels)
-        )
 
 
 @dp.message(Command("start"))
@@ -902,6 +884,17 @@ async def main():
     if outdated:
         logger.info("Пересчитан разбор у %d сохранённых вакансий", outdated)
 
+    collector = asyncio.create_task(
+        run_collection_loop(
+            vacancy_repository,
+            TELEGRAM_CHANNELS,
+            COLLECTOR_POST_LIMIT,
+            proxy=PROXY_URL,
+            interval_seconds=COLLECTION_INTERVAL_MINUTES * 60,
+            first_delay_seconds=FIRST_COLLECTION_DELAY_SECONDS,
+        )
+    )
+
     try:
         await dp.start_polling(bot)
     except asyncio.CancelledError:
@@ -911,6 +904,10 @@ async def main():
         logger.exception("Опрос Telegram прервался с ошибкой")
         raise
     finally:
+        collector.cancel()
+        # Даём задаче свернуться, иначе на выходе сыплются предупреждения
+        # о незавершённой корутине.
+        await asyncio.gather(collector, return_exceptions=True)
         await bot.session.close()
 
 
