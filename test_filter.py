@@ -183,6 +183,75 @@ class VacancyAnalysisTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "stop_words")
 
 
+class ShorthandBudgetTests(unittest.TestCase):
+    """Сокращения тысяч: так пишут постоянно."""
+
+    def test_letter_k_means_thousands(self):
+        budget = extract_budget("Оплата 5к")
+
+        self.assertEqual(budget["min_amount"], 5000)
+
+    def test_word_thousand_means_thousands(self):
+        for text in ("Бюджет 15 тыс. руб.", "Бюджет 15 тысяч руб."):
+            with self.subTest(text=text):
+                self.assertEqual(extract_budget(text)["min_amount"], 15000)
+
+    def test_shorthand_applies_to_both_ends_of_a_range(self):
+        budget = extract_budget("Бюджет 5-10к")
+
+        self.assertEqual(budget["payment_type"], "range")
+        self.assertEqual(budget["min_amount"], 5000)
+        self.assertEqual(budget["max_amount"], 10000)
+
+    def test_range_without_currency_is_understood(self):
+        budget = extract_budget("Бюджет 20 000 - 30 000")
+
+        self.assertEqual(budget["payment_type"], "range")
+        self.assertEqual(budget["max_amount"], 30000)
+
+    def test_small_numbers_are_not_mistaken_for_money(self):
+        # «2-3 раза в месяц» — это не диапазон бюджета.
+        budget = extract_budget("Оплата 2-3 раза в месяц, 50 000 руб.")
+
+        self.assertEqual(budget["payment_type"], "fixed")
+        self.assertEqual(budget["min_amount"], 50000)
+
+    def test_amount_with_currency_wins_over_a_stray_number(self):
+        budget = extract_budget("Нужно 3 правки, бюджет 12 000 руб.")
+
+        self.assertEqual(budget["min_amount"], 12000)
+
+
+class OpenEndedBudgetTests(unittest.TestCase):
+    """«от N ₽» — нижняя граница, а не точная сумма."""
+
+    def test_from_is_not_read_as_an_exact_amount(self):
+        budget = extract_budget("Бюджет от 5000 руб.")
+
+        self.assertEqual(budget["payment_type"], "from")
+        self.assertEqual(budget["min_amount"], 5000)
+        self.assertIsNone(budget["max_amount"])
+
+    def test_full_range_still_keeps_both_bounds(self):
+        budget = extract_budget("Бюджет от 20 000 до 40 000 руб.")
+
+        self.assertEqual(budget["payment_type"], "range")
+        self.assertEqual(budget["min_amount"], 20000)
+        self.assertEqual(budget["max_amount"], 40000)
+
+    def test_open_minimum_above_the_threshold_suits(self):
+        result = analyze_vacancy("Нужна презентация. Бюджет от 20 000 руб.", DESIGNER)
+
+        self.assertEqual(result["status"], "green")
+        self.assertEqual(result["reason_code"], "match")
+
+    def test_open_minimum_below_the_threshold_needs_a_look(self):
+        cheap = make_profile(["presentations"], min_budget=50000)
+        result = analyze_vacancy("Нужна презентация. Бюджет от 20 000 руб.", cheap)
+
+        self.assertEqual(result["status"], "yellow")
+
+
 class KeywordBoundaryTests(unittest.TestCase):
     """Ключевые слова ищутся с начала слова, а не кусками внутри него."""
 

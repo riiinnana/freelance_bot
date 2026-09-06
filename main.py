@@ -182,6 +182,9 @@ def format_budget(budget):
     if payment_type == "range":
         return f"{budget['min_amount']}–{budget['max_amount']} ₽ за проект"
 
+    if payment_type == "from":
+        return f"от {budget['min_amount']} ₽ за проект"
+
     if payment_type == "hourly":
         rate = f"{budget['hourly_rate']} ₽/час"
         if budget["estimated_project_total"] is None:

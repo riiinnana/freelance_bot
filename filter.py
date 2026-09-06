@@ -19,6 +19,39 @@ from keywords import compile_keywords, find_matches
 NUMBER = r"(\d{1,3}(?:[  ]\d{3})+|\d+)"
 CURRENCY = r"(?:₽|руб(?:лей|ля|ль)?|р\.)"
 
+# «5к», «15 тыс.», «20 тысяч» — так пишут постоянно, а без разбора «5к»
+# читалось как пять рублей, и вакансия отсеивалась как слишком дешёвая.
+THOUSANDS = r"(?:к|k|тыс\.?|тысяч(?:а|и)?)"
+
+# Ниже этой суммы число в диапазоне без валюты — почти наверняка не деньги,
+# а количество правок, недель или чего-то ещё.
+MIN_MEANINGFUL_AMOUNT = 500
+
+# Сначала диапазон с общим сокращением: в «5-10к» тысячи относятся к обоим
+# числам, хотя написаны один раз.
+THOUSANDS_RANGE_PATTERN = re.compile(
+    rf"(?<![\d.,])(\d{{1,4}})\s*[-–—]\s*(\d{{1,4}})\s*{THOUSANDS}(?![а-яa-z])",
+    re.IGNORECASE,
+)
+
+THOUSANDS_PATTERN = re.compile(
+    rf"(?<![\d.,])(\d{{1,4}})\s*{THOUSANDS}(?![а-яa-z])",
+    re.IGNORECASE,
+)
+
+
+def expand_thousands(text):
+    """Разворачивает сокращения тысяч в обычные числа."""
+
+    text = THOUSANDS_RANGE_PATTERN.sub(
+        lambda match: "%d-%d"
+        % (int(match.group(1)) * 1000, int(match.group(2)) * 1000),
+        text,
+    )
+    return THOUSANDS_PATTERN.sub(
+        lambda match: str(int(match.group(1)) * 1000), text
+    )
+
 # Направление не входит в выбранные, поэтому вакансия ниже в выдаче.
 OFF_PROFILE_PRIORITY = 10 ** 6
 
@@ -51,7 +84,7 @@ def extract_budget(text):
     почасовой ставки итог считается только при указанном количестве часов.
     """
 
-    text_lower = text.lower()
+    text_lower = expand_thousands(text.lower())
 
     hourly_match = re.search(
         rf"{NUMBER}\s*{CURRENCY}\s*(?:/|в\s+|за\s+)(?:час|ч\b)",
@@ -75,6 +108,22 @@ def extract_budget(text):
         rf"(?:от\s*)?{NUMBER}\s*(?:-|–|—|до)\s*{NUMBER}\s*{CURRENCY}",
         text_lower,
     )
+
+    if range_match is None:
+        # «бюджет 5-10к»: валюту часто не пишут, раз она понятна из слова
+        # «бюджет». Мелкие числа при этом игнорируем, иначе «оплата 2-3 раза
+        # в месяц» превратилась бы в диапазон two-three рублей.
+        budget_range_match = re.search(
+            rf"(?:бюджет|оплата|стоимость)[^\d]{{0,20}}"
+            rf"{NUMBER}\s*(?:-|–|—|до)\s*{NUMBER}",
+            text_lower,
+        )
+        if budget_range_match and min(
+            _parse_number(budget_range_match.group(1)),
+            _parse_number(budget_range_match.group(2)),
+        ) >= MIN_MEANINGFUL_AMOUNT:
+            range_match = budget_range_match
+
     if range_match:
         minimum = _parse_number(range_match.group(1))
         maximum = _parse_number(range_match.group(2))
@@ -88,10 +137,36 @@ def extract_budget(text):
             "estimated_project_total": None,
         }
 
-    fixed_match = re.search(
-        rf"{NUMBER}\s*{CURRENCY}|(?:бюджет|оплата|стоимость)[^\d]{{0,20}}{NUMBER}",
-        text_lower,
-    )
+    # «от 5000 ₽» — это нижняя граница, а не точная сумма. Проверяется после
+    # диапазона, иначе «от 20 000 до 40 000» потеряло бы верхнюю границу.
+    open_ended_match = re.search(rf"от\s*{NUMBER}\s*{CURRENCY}", text_lower)
+    if open_ended_match:
+        minimum = _parse_number(open_ended_match.group(1))
+        return {
+            "payment_type": "from",
+            "amount": None,
+            "min_amount": minimum,
+            "max_amount": None,
+            "hourly_rate": None,
+            "hours": None,
+            "estimated_project_total": None,
+        }
+
+    # Валюта — сильный признак, поэтому сумма с ней ищется первой. Раньше обе
+    # возможности стояли в одном шаблоне, и в «оплата 2-3 раза в месяц,
+    # 50 000 руб.» побеждала двойка просто потому, что была левее.
+    fixed_match = re.search(rf"{NUMBER}\s*{CURRENCY}", text_lower)
+
+    if fixed_match is None:
+        near_budget_word = re.search(
+            rf"(?:бюджет|оплата|стоимость)[^\d]{{0,20}}{NUMBER}", text_lower
+        )
+        if (
+            near_budget_word
+            and _parse_number(near_budget_word.group(1)) >= MIN_MEANINGFUL_AMOUNT
+        ):
+            fixed_match = near_budget_word
+
     if fixed_match:
         amount = _parse_number(next(value for value in fixed_match.groups() if value))
         return {
@@ -274,6 +349,14 @@ def evaluate_for_user(classification, profile):
         return _result(
             classification, "yellow", "hours_unknown",
             "Указана почасовая ставка, но не указано количество часов",
+            profile_keys, priority,
+        )
+
+    if budget["payment_type"] == "from" and minimum is not None:
+        return _result(
+            classification, "green", "match",
+            f"Сумма от {minimum} ₽ — не ниже твоего минимума; "
+            "подходит по направлению: " + ", ".join(direction_names(profile_keys)),
             profile_keys, priority,
         )
 
