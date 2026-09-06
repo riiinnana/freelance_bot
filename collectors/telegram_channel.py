@@ -8,6 +8,12 @@ from urllib.parse import quote
 import aiohttp
 
 
+REQUEST_TIMEOUT_SECONDS = 20
+
+# Ошибки, которые означают «канал сейчас недоступен», а не поломку бота.
+EXPECTED_FETCH_ERRORS = (aiohttp.ClientError, asyncio.TimeoutError, ValueError)
+
+
 @dataclass(frozen=True)
 class ChannelPost:
     """Публикация канала в едином формате вакансии."""
@@ -97,6 +103,28 @@ def parse_channel_posts(html, channel_username):
     return parser.posts
 
 
+def _new_session():
+    """Создаёт сессию с общими для всех запросов настройками."""
+
+    return aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
+        headers={"User-Agent": "freelance-bot/0.1"},
+    )
+
+
+async def _fetch_with_session(session, channel_username, limit, proxy):
+    username = channel_username.lstrip("@")
+    if not username.replace("_", "").isalnum():
+        raise ValueError("Имя Telegram-канала содержит недопустимые символы")
+
+    url = f"https://t.me/s/{quote(username)}"
+    async with session.get(url, proxy=proxy) as response:
+        response.raise_for_status()
+        html = await response.text()
+
+    return parse_channel_posts(html, username)[:limit]
+
+
 async def fetch_channel_posts(channel_username, limit=20, proxy=None):
     """Получает последние публичные публикации Telegram-канала.
 
@@ -104,41 +132,39 @@ async def fetch_channel_posts(channel_username, limit=20, proxy=None):
     в открытой веб-ленте канала.
     """
 
-    username = channel_username.lstrip("@")
-    if not username.replace("_", "").isalnum():
-        raise ValueError("Имя Telegram-канала содержит недопустимые символы")
-
-    url = f"https://t.me/s/{quote(username)}"
-    timeout = aiohttp.ClientTimeout(total=20)
-    headers = {"User-Agent": "freelance-bot/0.1"}
-
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.get(url, proxy=proxy) as response:
-            response.raise_for_status()
-            html = await response.text()
-
-    return parse_channel_posts(html, username)[:limit]
+    async with _new_session() as session:
+        return await _fetch_with_session(session, channel_username, limit, proxy)
 
 
 async def fetch_all_channel_posts(channels, limit=20, proxy=None):
-    """Собирает публикации из нескольких каналов.
+    """Собирает публикации из нескольких каналов одновременно.
 
-    Недоступность одного источника не прерывает сбор из остальных каналов.
+    Каналы опрашиваются параллельно: раньше они шли по очереди, и один
+    неотвечающий источник задерживал всю выдачу на свой таймаут.
+    Недоступность канала по-прежнему не прерывает сбор из остальных.
     """
+
+    async with _new_session() as session:
+        results = await asyncio.gather(
+            *(
+                _fetch_with_session(session, channel["username"], limit, proxy)
+                for channel in channels
+            ),
+            return_exceptions=True,
+        )
 
     collected_posts = []
     unavailable_channels = []
 
-    for channel in channels:
-        try:
-            posts = await fetch_channel_posts(
-                channel["username"],
-                limit=limit,
-                proxy=proxy,
-            )
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+    # Порядок результатов повторяет порядок каналов, поэтому выдача
+    # остаётся предсказуемой.
+    for channel, result in zip(channels, results):
+        if isinstance(result, EXPECTED_FETCH_ERRORS):
             unavailable_channels.append(channel["username"])
+        elif isinstance(result, BaseException):
+            # Не сетевая беда, а ошибка в коде — прятать её нельзя.
+            raise result
         else:
-            collected_posts.extend(posts)
+            collected_posts.extend(result)
 
     return collected_posts, unavailable_channels

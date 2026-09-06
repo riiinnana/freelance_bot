@@ -1,6 +1,7 @@
 import asyncio
-from html import escape
+import logging
 import os
+from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -52,7 +53,20 @@ if not bot_token:
     raise ValueError("BOT_TOKEN не найден в .env")
 
 
-PROXY_URL = "http://127.0.0.1:12334"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+logger = logging.getLogger("freelance_bot")
+
+# Пусто или не задано — работаем без proxy. Адрес задаётся в .env, чтобы
+# бот запускался в любой среде без правки кода.
+PROXY_URL = os.getenv("PROXY_URL") or None
+
+if PROXY_URL:
+    logger.info("Запросы идут через proxy %s", PROXY_URL)
+else:
+    logger.info("PROXY_URL не задан — работаю напрямую")
 
 session = AiohttpSession(proxy=PROXY_URL)
 
@@ -362,8 +376,9 @@ async def show_best_vacancy(message, user_id):
             proxy=PROXY_URL,
         )
     except Exception:
+        logger.exception("Не удалось получить вакансии из каналов")
         await message.answer(
-            "Не удалось получить вакансии. Проверь подключение к proxy и повтори попытку позже."
+            "Не удалось получить вакансии. Проверь подключение к сети и повтори попытку позже."
         )
         return
 
@@ -530,6 +545,14 @@ async def set_portfolio(message: Message, state: FSMContext):
 
 @dp.message()
 async def handle_buttons(message: Message):
+    if not message.text:
+        # Стикер, картинка или голосовое: разбирать нечего.
+        await message.answer(
+            "Я разбираю только текст. Пришли текст вакансии или выбери "
+            "действие в меню."
+        )
+        return
+
     profile = profile_repository.get(message.from_user.id)
 
     if message.text == "🔎 Найти вакансии":
@@ -746,9 +769,18 @@ async def reject_vacancy(callback: CallbackQuery):
 
 
 async def main():
-    print("Бот запускается...")
+    logger.info("Бот запускается")
 
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except asyncio.CancelledError:
+        logger.info("Бот остановлен")
+        raise
+    except Exception:
+        logger.exception("Опрос Telegram прервался с ошибкой")
+        raise
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":

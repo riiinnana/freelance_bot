@@ -1,6 +1,10 @@
+import asyncio
+import time
 import unittest
+from unittest import mock
 
-from collectors.telegram_channel import parse_channel_posts
+import collectors.telegram_channel as telegram_channel
+from collectors.telegram_channel import fetch_all_channel_posts, parse_channel_posts
 
 
 PREVIEW_HTML = """
@@ -27,6 +31,70 @@ class TelegramChannelParserTests(unittest.TestCase):
         self.assertEqual(posts[0].title, "Нужен дизайнер презентаций.")
         self.assertIn("Бюджет: 5 000 ₽.", posts[0].description)
         self.assertEqual(posts[0].published_at, "2026-08-22T10:00:00+00:00")
+
+
+class FakeSession:
+    """Заглушка сессии: настоящих запросов в тестах не делаем."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class ParallelFetchTests(unittest.TestCase):
+    """Каналы должны опрашиваться одновременно, а не по очереди."""
+
+    CHANNELS = [{"username": "ch%d" % number} for number in range(6)]
+    DELAY = 0.05
+
+    def _run(self, fetch):
+        with mock.patch.object(telegram_channel, "_fetch_with_session", fetch),              mock.patch.object(telegram_channel, "_new_session", FakeSession):
+            return asyncio.run(fetch_all_channel_posts(self.CHANNELS))
+
+    def test_channels_are_polled_at_the_same_time(self):
+        async def slow(session, username, limit, proxy):
+            await asyncio.sleep(self.DELAY)
+            return ["пост из " + username]
+
+        started = time.perf_counter()
+        posts, unavailable = self._run(slow)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(len(posts), len(self.CHANNELS))
+        self.assertEqual(unavailable, [])
+        # Последовательный обход занял бы шесть задержек.
+        self.assertLess(elapsed, self.DELAY * len(self.CHANNELS) / 2)
+
+    def test_one_unavailable_channel_does_not_stop_the_rest(self):
+        async def one_times_out(session, username, limit, proxy):
+            if username == "ch3":
+                raise asyncio.TimeoutError
+            return ["пост из " + username]
+
+        posts, unavailable = self._run(one_times_out)
+
+        self.assertEqual(unavailable, ["ch3"])
+        self.assertEqual(len(posts), len(self.CHANNELS) - 1)
+
+    def test_results_keep_the_order_of_the_channel_list(self):
+        async def by_name(session, username, limit, proxy):
+            return ["пост из " + username]
+
+        posts, _ = self._run(by_name)
+
+        self.assertEqual(
+            posts, ["пост из ch%d" % number for number in range(6)]
+        )
+
+    def test_a_bug_in_the_collector_is_not_swallowed(self):
+        async def broken(session, username, limit, proxy):
+            raise KeyError("опечатка в разборе")
+
+        # Ошибку кода нельзя прятать в «канал недоступен».
+        with self.assertRaises(KeyError):
+            self._run(broken)
 
 
 if __name__ == "__main__":
