@@ -27,7 +27,9 @@ from directions import (
     directions_in_group,
     group_name,
 )
-from filter import analyze_vacancy
+from filter import analyze_vacancy, evaluate_for_user
+from storage import DATABASE_PATH
+from vacancies import VacancyRepository
 from profiles import (
     MAX_ALLOWED_BUDGET,
     MIN_ALLOWED_BUDGET,
@@ -76,8 +78,9 @@ bot = Bot(
 )
 
 dp = Dispatcher()
-action_repository = VacancyActionRepository("data/rejections.db")
-profile_repository = ProfileRepository("data/rejections.db")
+action_repository = VacancyActionRepository(DATABASE_PATH)
+profile_repository = ProfileRepository(DATABASE_PATH)
+vacancy_repository = VacancyRepository(DATABASE_PATH)
 
 # Вакансии, которые попадают в выдачу: точное совпадение с профилем и —
 # при выключенном строгом режиме — смежные направления.
@@ -369,6 +372,7 @@ async def show_best_vacancy(message, user_id):
         await send_settings(message, profile)
         return
 
+    unavailable_channels = []
     try:
         posts, unavailable_channels = await fetch_all_channel_posts(
             TELEGRAM_CHANNELS,
@@ -377,20 +381,30 @@ async def show_best_vacancy(message, user_id):
         )
     except Exception:
         logger.exception("Не удалось получить вакансии из каналов")
-        await message.answer(
-            "Не удалось получить вакансии. Проверь подключение к сети и повтори попытку позже."
+        # Сеть могла отвалиться, но в базе уже что-то лежит — покажем оттуда.
+        if not vacancy_repository.count():
+            await message.answer(
+                "Не удалось получить вакансии. Проверь подключение к сети "
+                "и повтори попытку позже."
+            )
+            return
+    else:
+        added, duplicates = vacancy_repository.save_posts(posts)
+        logger.info(
+            "Собрано публикаций: %d, новых: %d, повторов: %d",
+            len(posts), added, duplicates,
         )
-        return
 
     actions = action_repository.actions_for_user(user_id)
 
     candidates = []
-    for post in posts:
+    for post in vacancy_repository.all():
         action = actions.get(post.source_id)
         if action in HIDDEN_ACTIONS:
             continue
 
-        result = analyze_vacancy(post.description, profile)
+        # Разбор уже посчитан при сборе — здесь только примерка под профиль.
+        result = evaluate_for_user(post.classification, profile)
         if result["reason_code"] not in SHOWN_REASON_CODES:
             continue
 
