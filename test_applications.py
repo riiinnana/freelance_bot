@@ -1,5 +1,7 @@
+import re
 import unittest
 
+from application_settings import PITCH_BY_DIRECTION
 from applications import build_application_text, build_chat_link, extract_contact_username
 
 
@@ -74,6 +76,24 @@ class ApplicationTests(unittest.TestCase):
 
         self.assertTrue(link.startswith("https://t.me/company_hr?text="))
         self.assertIn("Портфолио", draft)
+
+    def test_drafts_carry_no_grammatical_gender(self):
+        # Бот один на всех, поэтому отклик должен одинаково звучать
+        # от любого человека.
+        gendered = re.compile(
+            r"\b(?:увидела|увидел|готова|готов|рада|рад|хотела|хотел"
+            r"|сделала|сделал|была|был|могла|мог|уверена|уверен)\b",
+            re.IGNORECASE,
+        )
+
+        for direction in list(PITCH_BY_DIRECTION) + [None]:
+            keys = (direction,) if direction else ()
+            for seed in ("a/1", "b/2", "c/3", "d/4"):
+                draft = build_application_text(
+                    "Задача", "https://example.com/p", keys, seed=seed
+                )
+                with self.subTest(direction=direction, seed=seed):
+                    self.assertIsNone(gendered.search(draft), draft)
 
     def test_draft_uses_the_personal_portfolio_link(self):
         draft = build_application_text(
