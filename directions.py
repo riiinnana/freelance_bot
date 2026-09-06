@@ -104,6 +104,16 @@ DIRECTIONS = (
         ),
     ),
     Direction(
+        key="illustration",
+        name="Иллюстрация",
+        group="graphics_2d",
+        keywords=(
+            "иллюстрац*", "иллюстратор*", "отрисовк*", "отрисовать",
+            "нарисовать", "скетч*", "рисунок", "рисунк*", "лайнарт",
+            "растровая графика", "векторн* иллюстрац*",
+        ),
+    ),
+    Direction(
         key="infographics",
         name="Инфографика",
         group="graphics_2d",
@@ -171,6 +181,7 @@ DIRECTIONS = (
         keywords=(
             "геймдев", "gamedev", "игров* график*", "environment art",
             "пропс*", "low poly", "lowpoly", "лоуполи", "гейм-арт",
+            "unreal engine", "unity",
         ),
     ),
     Direction(
@@ -198,6 +209,34 @@ DIRECTIONS = (
         group="motion_block",
         keywords=(
             "анимация логотипа", "анимировать логотип", "лого анимаци*",
+        ),
+    ),
+    Direction(
+        key="three_d_animation",
+        name="3D-анимация",
+        group="motion_block",
+        keywords=(
+            "3d анимаци*", "3d-анимаци*", "анимация 3d", "трёхмерн* анимаци*",
+            "трехмерн* анимаци*", "анимация модел*",
+        ),
+    ),
+    Direction(
+        key="character_animation",
+        name="Анимация персонажей",
+        group="motion_block",
+        keywords=(
+            "анимация персонаж*", "анимаци* персонаж*", "оживить персонаж*",
+            "анимировать персонаж*", "аниматор* персонаж*",
+            "character animation",
+        ),
+    ),
+    Direction(
+        key="rigging",
+        name="Риггинг",
+        group="motion_block",
+        keywords=(
+            "риггинг", "rigging", "риг персонаж*", "настройка скелета",
+            "скелет персонаж*", "скиннинг", "skinning",
         ),
     ),
     Direction(

@@ -259,6 +259,45 @@ class ThreeDSphereTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "off_profile_strict")
 
 
+
+class NewDirectionTests(unittest.TestCase):
+    """Направления, добавленные под первую волну тестов."""
+
+    def test_illustration_is_its_own_direction(self):
+        keys, _ = find_directions(
+            "Нужен иллюстратор, отрисовать 10 картинок для книги."
+        )
+
+        self.assertIn("illustration", keys)
+
+    def test_three_d_animation_is_recognised(self):
+        keys, _ = find_directions(
+            "Требуется 3D-анимация продукта для рекламы."
+        )
+
+        self.assertIn("three_d_animation", keys)
+
+    def test_character_animator_wording_is_recognised(self):
+        keys, _ = find_directions("Ищем аниматора персонажей для мультфильма.")
+
+        self.assertIn("character_animation", keys)
+
+    def test_rigging_is_recognised(self):
+        keys, _ = find_directions("Нужен риггинг персонажа под движок.")
+
+        self.assertIn("rigging", keys)
+
+    def test_video_editing_was_already_there(self):
+        keys, _ = find_directions("Нужен видеомонтаж роликов для ютуба.")
+
+        self.assertIn("video_editing", keys)
+
+    def test_game_engines_point_at_game_graphics(self):
+        for text in ("Окружение в Unreal Engine.", "Ассеты в Unity."):
+            with self.subTest(text=text):
+                self.assertIn("three_d_game", find_directions(text)[0])
+
+
 class DirectionCatalogueTests(unittest.TestCase):
     def test_every_direction_belongs_to_a_known_group(self):
         for direction in DIRECTIONS:
