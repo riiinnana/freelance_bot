@@ -36,6 +36,60 @@ def make_profile(
 DESIGNER = make_profile(["presentations", "banners", "covers", "product_cards"])
 
 
+class AnotherRoleTests(unittest.TestCase):
+    """На живых тестах в выдачу полезли эсэмэмщики и рекламщики.
+
+    Проходили они честно: «креативы», «reels», «обложки» есть в любой
+    вакансии эсэмэмщика. Отличает их роль в заголовке.
+    """
+
+    SMM = (
+        "SMM-менеджер / Контент креатор\n"
+        "Вести аккаунт в Instagram и Telegram, публиковать посты по "
+        "контент-плану, снимать Reels и Stories, готовить креативы для "
+        "рекламы, работать с обложками.\n"
+        "Оплата 40 000 ₽ в месяц."
+    )
+
+    SMM_DESIGNER = (
+        "SMM-дизайнер\n"
+        "Оформлять посты и Stories по брендбуку, готовить креативы для "
+        "рекламы и обложки для Reels.\n"
+        "Бюджет 40 000 ₽ за проект."
+    )
+
+    def test_an_smm_vacancy_is_rejected(self):
+        profile = make_profile(["ad_creatives", "covers", "reels"])
+        result = analyze_vacancy(self.SMM, profile)
+
+        self.assertEqual(result["reason_code"], "another_role")
+        self.assertEqual(result["status"], "red")
+
+    def test_an_smm_designer_vacancy_still_passes(self):
+        # Тема та же самая, работа дизайнерская — терять её нельзя.
+        profile = make_profile(["ad_creatives", "covers", "reels"])
+        result = analyze_vacancy(self.SMM_DESIGNER, profile)
+
+        self.assertEqual(result["reason_code"], "match")
+
+    def test_the_decision_does_not_depend_on_the_user(self):
+        # Признак считается один раз при сборе, а не под каждый профиль.
+        self.assertTrue(classify_vacancy(self.SMM)["hires_someone_else"])
+        self.assertFalse(classify_vacancy(self.SMM_DESIGNER)["hires_someone_else"])
+
+    def test_a_craft_word_saves_a_vague_job_title(self):
+        vacancy = (
+            "3D-специалист по предметной визуализации\n"
+            "Моделировать товары и делать рендеры для карточек.\n"
+            "Бюджет 30 000 ₽ за проект."
+        )
+        profile = make_profile(["three_d", "three_d_product"])
+
+        self.assertNotEqual(
+            analyze_vacancy(vacancy, profile)["reason_code"], "another_role"
+        )
+
+
 class BudgetExtractionTests(unittest.TestCase):
     def test_fixed_project_budget(self):
         budget = extract_budget("Нужна презентация. Бюджет: 5 000 ₽.")

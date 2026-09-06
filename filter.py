@@ -14,6 +14,8 @@ from commitment import ANY, commitment_name, detect_commitment
 from directions import DIRECTIONS, direction_names
 from filter_settings import UNIVERSAL_STOP_WORDS
 from keywords import compile_keywords, find_matches
+from roles import hires_someone_else
+from vacancy_summary import build_title
 
 
 NUMBER = r"(\d{1,3}(?:[  ]\d{3})+|\d+)"
@@ -226,6 +228,9 @@ def classify_vacancy(text):
         "direction_keys": direction_keys,
         "matched_keywords": matched_keywords,
         "matched_stop_words": find_stop_words(text),
+        # Решается по заголовку: в теле «дизайн» и «smm» идут вперемешку,
+        # а в заголовке стоит именно та роль, которую зовут.
+        "hires_someone_else": hires_someone_else(build_title(text)),
     }
 
 
@@ -238,6 +243,7 @@ CLASSIFICATION_KEYS = frozenset(
         "direction_keys",
         "matched_keywords",
         "matched_stop_words",
+        "hires_someone_else",
     }
 )
 
@@ -276,6 +282,16 @@ def evaluate_for_user(classification, profile):
         return _result(
             classification, "red", "stop_words",
             "Неподходящий тип работы: " + ", ".join(stop_words),
+            [], OFF_PROFILE_PRIORITY,
+        )
+
+    # Стоп-слова смотрят на весь текст, а это — на то, кого зовут.
+    # У эсэмэмщика в вакансии честно есть и «креативы», и «reels», и
+    # «обложки» — по словам она проходит, по работе нет.
+    if classification.get("hires_someone_else"):
+        return _result(
+            classification, "red", "another_role",
+            "Ищут не дизайнера, а другого специалиста",
             [], OFF_PROFILE_PRIORITY,
         )
 
