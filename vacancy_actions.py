@@ -12,9 +12,10 @@
   свежие вакансии закончатся.
 """
 
-import sqlite3
 from contextlib import closing
 from pathlib import Path
+
+from storage import connect
 
 
 RESPONDED = "responded"
@@ -46,7 +47,7 @@ class VacancyActionRepository:
             self._import_old_rejections(connection)
 
     def _connect(self):
-        return sqlite3.connect(self.database_path, isolation_level=None)
+        return connect(self.database_path)
 
     @staticmethod
     def _import_old_rejections(connection):

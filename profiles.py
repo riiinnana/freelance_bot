@@ -1,10 +1,10 @@
 """Профиль пользователя: направления, порог бюджета и строгий режим."""
 
-import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from storage import connect
 from commitment import ANY, COMMITMENTS
 from directions import DIRECTION_BY_KEY
 from config import DEFAULT_PORTFOLIO_URL
@@ -97,7 +97,7 @@ class ProfileRepository:
             )
 
     def _connect(self):
-        return sqlite3.connect(self.database_path, isolation_level=None)
+        return connect(self.database_path)
 
     @staticmethod
     def _add_missing_columns(connection):

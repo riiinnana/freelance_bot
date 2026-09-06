@@ -9,7 +9,9 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
+    ErrorEvent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -97,14 +99,25 @@ CHANNEL_USERNAMES = [channel["username"] for channel in TELEGRAM_CHANNELS]
 # Ссылки на чат с заказчиком для показанных вакансий. В callback приходит
 # только идентификатор поста, а собирать черновик заново пришлось бы через
 # повторный опрос каналов — то самое ожидание, от которого мы уходим.
+#
+# Хранится отдельно по каждому пользователю: в общем списке активные
+# вытесняли бы черновики тех, кто читает медленнее.
 pending_chat_links = {}
-MAX_PENDING_CHAT_LINKS = 200
+MAX_LINKS_PER_USER = 20
 
 
 def remember_chat_link(user_id, source_id, chat_url):
-    pending_chat_links[(user_id, source_id)] = chat_url
-    while len(pending_chat_links) > MAX_PENDING_CHAT_LINKS:
-        pending_chat_links.pop(next(iter(pending_chat_links)))
+    links = pending_chat_links.setdefault(user_id, {})
+    links[source_id] = chat_url
+    while len(links) > MAX_LINKS_PER_USER:
+        links.pop(next(iter(links)))
+
+
+def take_chat_link(user_id, source_id):
+    """Забирает ссылку на чат: повторно она уже не понадобится."""
+
+    links = pending_chat_links.get(user_id)
+    return links.pop(source_id, None) if links else None
 
 
 class SettingsStates(StatesGroup):
@@ -122,6 +135,29 @@ COMMITMENT_BUTTON_LABELS = {
     ONGOING: "только долгосрок",
 }
 
+
+HELP_TEXT = """<b>Что делает бот</b>
+
+Раз в 15 минут я обхожу Telegram-каналы с вакансиями для дизайнеров,
+разбираю объявления и оставляю те, что подходят именно тебе.
+
+<b>Кнопки</b>
+🔎 <b>Найти вакансии</b> — показываю одну самую подходящую.
+⚙️ <b>Настройки</b> — направления, вилка сумм, формат работы, портфолио.
+
+<b>Под каждой вакансией</b>
+✉️ <b>Написать заказчику</b> — открываю чат с готовым черновиком отклика.
+Отправляешь его ты, я ничего никому не рассылаю.
+⏭️ <b>Пропустить</b> — вакансия вернётся позже, когда свежие кончатся.
+✖️ <b>Не подходит</b> — больше её не покажу.
+
+<b>Настройки стоит проверить в первую очередь</b>
+Направления собраны в три блока — 2D, 3D, анимация и видео. Порядок
+выбора задаёт приоритет: что отметишь первым, будет выше в выдаче.
+Строгий режим показывает только выбранное; если его выключить, смежные
+направления тоже попадут в выдачу, но в конец.
+
+Команды: /start — начать заново, /help — эта справка."""
 
 # Главное меню
 main_menu = ReplyKeyboardMarkup(
@@ -514,6 +550,38 @@ async def show_best_vacancy(message, user_id):
     )
 
 
+@dp.message(Command("help"))
+async def help_command(message: Message):
+    await message.answer(HELP_TEXT, parse_mode="HTML")
+
+
+@dp.error()
+async def on_unexpected_error(event: ErrorEvent):
+    """Ловит всё, что не поймали обработчики.
+
+    Без этого падение внутри обработчика уходило только в лог, а человек
+    видел тишину и не понимал, жив ли бот.
+    """
+
+    logger.exception(
+        "Необработанная ошибка при обновлении", exc_info=event.exception
+    )
+
+    message = event.update.message
+    if message is None and event.update.callback_query is not None:
+        message = event.update.callback_query.message
+
+    if message is not None:
+        try:
+            await message.answer(
+                "Что-то пошло не так с моей стороны. Попробуй ещё раз, "
+                "а если повторится — напиши мне об этом."
+            )
+        except Exception:
+            logger.exception("Не удалось сообщить пользователю об ошибке")
+
+    return True
+
 @dp.message(Command("start"))
 async def start_command(message: Message, state: FSMContext):
     await state.clear()
@@ -835,7 +903,7 @@ async def write_to_customer(callback: CallbackQuery):
     action_repository.record(user_id, source_id, RESPONDED)
     await callback.answer("Отмечено: написала")
 
-    chat_url = pending_chat_links.pop((user_id, source_id), None)
+    chat_url = take_chat_link(user_id, source_id)
     if chat_url:
         await callback.message.answer(
             "✉️ Черновик готов. Открой чат, поправь под себя и отправь.",
@@ -879,6 +947,15 @@ async def reject_vacancy(callback: CallbackQuery):
 
 async def main():
     logger.info("Бот запускается")
+
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Начать заново"),
+            BotCommand(command="help", description="Что умеет бот"),
+        ])
+    except Exception:
+        # Меню команд — украшение: без него бот работает.
+        logger.exception("Не удалось установить меню команд")
 
     outdated = vacancy_repository.reclassify_outdated()
     if outdated:

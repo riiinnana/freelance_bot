@@ -15,11 +15,11 @@
 import hashlib
 import json
 import re
-import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from storage import connect
 from filter import CLASSIFICATION_KEYS, classify_vacancy
 
 
@@ -157,7 +157,7 @@ class VacancyRepository:
             )
 
     def _connect(self):
-        return sqlite3.connect(self.database_path, isolation_level=None)
+        return connect(self.database_path)
 
     def save_posts(self, posts):
         """Сохраняет новые публикации, пропуская уже известные.
