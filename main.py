@@ -33,7 +33,9 @@ from directions import (
 )
 from filter import analyze_vacancy, evaluate_for_user
 from storage import DATABASE_PATH
+from budget_format import format_amount, format_budget
 from vacancies import VacancyRepository
+from vacancy_summary import build_title, extract_task
 from profiles import (
     MAX_ALLOWED_BUDGET,
     MIN_ALLOWED_BUDGET,
@@ -175,32 +177,6 @@ main_menu = ReplyKeyboardMarkup(
 )
 
 
-def format_budget(budget):
-    """Форматирует бюджет с упором на итоговую сумму за проект."""
-
-    payment_type = budget["payment_type"]
-
-    if payment_type == "fixed":
-        return f"{budget['estimated_project_total']} ₽ за проект"
-
-    if payment_type == "range":
-        return f"{budget['min_amount']}–{budget['max_amount']} ₽ за проект"
-
-    if payment_type == "from":
-        return f"от {budget['min_amount']} ₽ за проект"
-
-    if payment_type == "hourly":
-        rate = f"{budget['hourly_rate']} ₽/час"
-        if budget["estimated_project_total"] is None:
-            return f"{rate}; количество часов не указано"
-        return (
-            f"{rate}; {budget['hours']} ч. = "
-            f"{budget['estimated_project_total']} ₽ за проект"
-        )
-
-    return "не указана"
-
-
 def build_settings_text(profile):
     """Собирает описание текущих настроек поиска."""
 
@@ -226,9 +202,9 @@ def build_settings_text(profile):
         else "Показываю и смежные направления, но в конце списка."
     )
 
-    budget_block = f"от {profile.min_budget} ₽"
+    budget_block = f"от {format_amount(profile.min_budget)} ₽"
     if profile.has_max_budget:
-        budget_block += f" до {profile.max_budget} ₽"
+        budget_block += f" до {format_amount(profile.max_budget)} ₽"
 
     commitment_block = {
         ANY: "любой",
@@ -404,23 +380,37 @@ async def send_settings(message, profile):
 
 
 def format_collected_vacancy(post, result):
-    """Создаёт компактное сообщение с результатом анализа публикации."""
+    """Собирает карточку вакансии.
+
+    В карточке только то, по чему принимается решение откликаться:
+    должность, деньги и что надо сделать. Направления и причина
+    отбора — это внутренняя кухня фильтра, читателю она ничего не даёт.
+    """
 
     status_icons = {"green": "🟢", "yellow": "🟡"}
-    directions = ", ".join(result["work_types"])
+
+    title = build_title(post.description, post.title)
+    task = extract_task(post.description, title)
+
+    lines = [
+        f"{status_icons[result['status']]} <b>{escape(title)}</b>",
+        "",
+        f"<b>Бюджет:</b> {escape(format_budget(result['budget']))}",
+    ]
+
+    if task:
+        lines += ["", "<b>Задача:</b>", escape(task)]
+
+    lines += ["", f"<b>Источник:</b> {escape(post.source)}"]
 
     label = commitment_label(result.get("commitment"))
-    commitment_line = f"<b>Формат:</b> {label}' + NL + '" if label else ""
+    if label:
+        lines.append(f"<b>Формат:</b> {escape(label)}")
 
-    return (
-        f"{status_icons[result['status']]} <b>{escape(post.title)}</b>\n\n"
-        f"<b>Бюджет:</b> {escape(format_budget(result['budget']))}\n"
-        f"{commitment_line}"
-        f"<b>Источник:</b> {escape(post.source)}\n"
-        f"<b>Направления:</b> {escape(directions)}\n"
-        f"<b>Причина:</b> {escape(result['reason'])}\n\n"
-        f"<a href=\"{escape(post.url, quote=True)}\">Открыть публикацию в канале</a>"
-    )
+    link = escape(post.url, quote=True)
+    lines += ["", f'<a href="{link}">Открыть публикацию в канале</a>']
+
+    return "\n".join(lines)
 
 
 def candidate_score(post, result, contact_username, is_skipped):
@@ -506,8 +496,10 @@ async def show_best_vacancy(message, user_id):
 
     buttons = []
     if contact_username:
+        # Не post.title: в отклике «Заинтересовала ваша задача „Ну как
+        # дела в школе?“» звучит нелепо, нужна должность.
         draft = build_application_text(
-            post.title,
+            build_title(post.description, post.title),
             profile.portfolio_url,
             result["profile_direction_keys"] or result["direction_keys"],
             seed=post.source_id,
