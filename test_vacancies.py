@@ -3,6 +3,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
+from digests import split_post
 from vacancies import (
     DUPLICATE_SIMILARITY,
     VacancyRepository,
@@ -39,6 +40,65 @@ VACANCY = (
     "20 слайдов, бюджет 30 000 руб.\n"
     "По вопросам писать @customer_hr"
 )
+
+
+DIGEST = """Ловите свежую подборочку 🫶
+
+1. #Графдизайнер
+Нужно разработать визуальную концепцию для Instagram. Бюджет 15000 ₽
+📝 @selannaaaa
+
+2. #Монтажер
+Нужно смонтировать 11 Reels для beauty-проекта. Оплата 20000 ₽ за проект
+📝 @ilya_re2"""
+
+
+class ResplitDigestsTests(unittest.TestCase):
+    """Подборки, собранные до разбивки, надо пересобрать в базе."""
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.repository = VacancyRepository(
+            Path(self._directory.name) / "vacancies.db"
+        )
+
+    def test_a_stored_digest_is_replaced_by_its_items(self):
+        self.repository.save_posts([make_post("ch/9307", DIGEST)])
+
+        digests, added = self.repository.resplit_digests(split_post)
+
+        self.assertEqual((digests, added), (1, 2))
+        self.assertEqual(self.repository.count(), 2)
+
+    def test_the_whole_digest_is_gone_from_the_database(self):
+        self.repository.save_posts([make_post("ch/9307", DIGEST)])
+        self.repository.resplit_digests(split_post)
+
+        self.assertNotIn(
+            "ch/9307", [v.source_id for v in self.repository.all()]
+        )
+
+    def test_items_keep_the_link_to_the_publication(self):
+        self.repository.save_posts([make_post("ch/9307", DIGEST)])
+        self.repository.resplit_digests(split_post)
+
+        self.assertEqual(
+            {v.url for v in self.repository.all()}, {"https://t.me/ch/9307"}
+        )
+
+    def test_ordinary_vacancies_are_left_alone(self):
+        self.repository.save_posts([make_post("ch/1", VACANCY)])
+
+        self.assertEqual(self.repository.resplit_digests(split_post), (0, 0))
+        self.assertEqual(self.repository.count(), 1)
+
+    def test_running_it_twice_changes_nothing(self):
+        self.repository.save_posts([make_post("ch/9307", DIGEST)])
+        self.repository.resplit_digests(split_post)
+
+        self.assertEqual(self.repository.resplit_digests(split_post), (0, 0))
+        self.assertEqual(self.repository.count(), 2)
 
 
 class FingerprintTests(unittest.TestCase):

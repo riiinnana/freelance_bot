@@ -141,6 +141,29 @@ class TaskTests(unittest.TestCase):
         self.assertNotIn("композиции", task)
 
 
+    def test_a_contact_glued_to_the_task_does_not_eat_the_line(self):
+        # В подборках контакт часто дописан прямо в конец описания.
+        task = extract_task(
+            "#Дизайнер_упаковки\n"
+            "Нужно разработать дизайн стаканчика для кофе. "
+            "Бюджет 5 000 сом @michaelscottch"
+        )
+
+        self.assertIn("стаканчика для кофе", task)
+
+    def test_a_line_without_a_cue_word_still_becomes_the_task(self):
+        # Пункт подборки часто продолжает заголовок: «#Копирайтер / для
+        # долгосрочного сотрудничества».
+        task = extract_task("#Копирайтер\nдля Tg-канала. Писать посты\n📝 @someone")
+
+        self.assertIn("Tg-канала", task)
+
+    def test_a_pure_contact_line_is_still_dropped(self):
+        task = extract_task("#Дизайнер\nНужно сделать баннер\n📝 @someone")
+
+        self.assertNotIn("someone", task)
+
+
 class TrailingPunctuationTests(unittest.TestCase):
     def test_title_does_not_end_with_a_colon(self):
         text = (

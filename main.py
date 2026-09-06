@@ -31,6 +31,7 @@ from directions import (
     directions_in_group,
     group_name,
 )
+from digests import split_post
 from filter import analyze_vacancy, evaluate_for_user
 from storage import DATABASE_PATH
 from budget_format import format_amount, format_budget
@@ -964,6 +965,13 @@ async def main():
     except Exception:
         # Меню команд — украшение: без него бот работает.
         logger.exception("Не удалось установить меню команд")
+
+    digests, from_digests = vacancy_repository.resplit_digests(split_post)
+    if digests:
+        logger.info(
+            "Разобрано подборок: %d, вакансий из них: %d",
+            digests, from_digests,
+        )
 
     outdated = vacancy_repository.reclassify_outdated()
     if outdated:

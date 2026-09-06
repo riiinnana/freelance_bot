@@ -39,6 +39,76 @@ def make_post(number):
     )
 
 
+DIGEST = """Ловите свежую подборочку 🫶
+
+1. #Графдизайнер
+Нужно разработать визуальную концепцию для Instagram. Бюджет 15000 ₽
+📝 @selannaaaa
+
+2. #Монтажер
+Нужно смонтировать 11 Reels для beauty-проекта. Оплата 20000 ₽ за проект
+📝 @ilya_re2"""
+
+
+def make_digest():
+    """Публикация-подборка: две вакансии в одном посте."""
+
+    return Post(
+        source_id="ch/9307",
+        source="@ch",
+        title="Ловите свежую подборочку",
+        description=DIGEST,
+        url="https://t.me/ch/9307",
+    )
+
+
+class DigestTests(unittest.TestCase):
+    """Пост с несколькими вакансиями должен попасть в базу несколькими."""
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.repository = VacancyRepository(
+            Path(self._directory.name) / "vacancies.db"
+        )
+
+    def _collect(self, *posts):
+        async def fetch(channels, limit=20, proxy=None):
+            return list(posts), []
+
+        return asyncio.run(
+            collect_once(self.repository, CHANNELS, 20, fetch=fetch)
+        )
+
+    def test_a_digest_becomes_several_vacancies(self):
+        added, _ = self._collect(make_digest())
+
+        self.assertEqual(added, 2)
+        self.assertEqual(self.repository.count(), 2)
+
+    def test_each_vacancy_gets_its_own_budget(self):
+        self._collect(make_digest())
+
+        totals = sorted(
+            vacancy.classification["budget"]["estimated_project_total"]
+            for vacancy in self.repository.all()
+        )
+
+        self.assertEqual(totals, [15000, 20000])
+
+    def test_an_ordinary_post_still_lands_as_one(self):
+        added, _ = self._collect(make_post(1))
+
+        self.assertEqual(added, 1)
+
+    def test_collecting_the_same_digest_twice_adds_nothing(self):
+        self._collect(make_digest())
+        added, duplicates = self._collect(make_digest())
+
+        self.assertEqual(added, 0)
+        self.assertEqual(duplicates, 2)
+
+
 class CollectOnceTests(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()

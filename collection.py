@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from collectors.telegram_channel import fetch_all_channel_posts
+from digests import split_all
 
 
 logger = logging.getLogger("freelance_bot.collection")
@@ -28,11 +29,16 @@ async def collect_once(
     """Обходит каналы и складывает новые публикации в базу."""
 
     posts, unavailable_channels = await fetch(channels, limit=limit, proxy=proxy)
-    added, duplicates = repository.save_posts(posts)
+
+    # Один пост — не всегда одна вакансия: часть каналов публикует
+    # подборки по десятку штук разом.
+    vacancies = split_all(posts)
+    added, duplicates = repository.save_posts(vacancies)
 
     logger.info(
-        "Сбор: публикаций %d, новых %d, повторов %d, всего в базе %d",
-        len(posts), added, duplicates, repository.count(),
+        "Сбор: публикаций %d, вакансий %d, новых %d, "
+        "повторов %d, всего в базе %d",
+        len(posts), len(vacancies), added, duplicates, repository.count(),
     )
 
     if unavailable_channels:

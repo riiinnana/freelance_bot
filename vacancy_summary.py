@@ -292,18 +292,38 @@ def _starts_with(line, prefixes):
     return any(head == prefix or head.startswith(prefix) for prefix in prefixes)
 
 
-def _is_noise(raw):
-    """Контакты, ссылки и строки про деньги в суть задачи не идут.
+# Сколько букв может остаться в строке после вычёркивания ссылок, чтобы
+# она всё ещё считалась просто контактом.
+CONTACT_LINE_TEXT_LIMIT = 15
+
+
+def is_contact_line(raw):
+    """Строка — это контакт или ссылка, а не текст с упоминанием внутри.
 
     Проверяется исходная строка, а не очищенная: очистка снимает ведущие
     знаки, и «➡️ @muzykalarisa» превращается в безобидное «muzykalarisa».
+
+    Одного упоминания мало: в подборках контакт часто дописан прямо в
+    конец задачи — «Нужен дизайн стаканчика. Бюджет 5 000 сом
+    @michaelscottch». Выбросив такую строку, мы выбросили бы всё описание,
+    поэтому смотрим, много ли останется текста без ссылок.
     """
 
-    return bool(_LINK.search(raw)) or bool(_MONEY_ONLY.match(raw.strip()))
+    if not _LINK.search(raw):
+        return False
+
+    rest = _LINK.sub(" ", raw)
+    return len(_LETTER.findall(rest)) < CONTACT_LINE_TEXT_LIMIT
 
 
-def _is_next_item(raw):
-    """Начало следующей вакансии в подборке из нескольких штук."""
+def _is_noise(raw):
+    """Контакты, ссылки и строки про деньги в суть задачи не идут."""
+
+    return is_contact_line(raw) or bool(_MONEY_ONLY.match(raw.strip()))
+
+
+def is_item_start(raw):
+    """Начало очередной вакансии в подборке из нескольких штук."""
 
     stripped = raw.replace("​", "").strip()
     if _HASHTAGS_ONLY.match(stripped):
@@ -320,7 +340,7 @@ def _collect(lines, start, skip_first_line_noise):
     length = 0
 
     for offset, raw in enumerate(lines[start:]):
-        if offset and (_starts_with(raw, STOP_HEADERS) or _is_next_item(raw)):
+        if offset and (_starts_with(raw, STOP_HEADERS) or is_item_start(raw)):
             break
 
         line = _clean_line(raw)
@@ -365,8 +385,13 @@ def _format_task(collected):
 
 
 def extract_task(text, title=""):
-    """Возвращает суть задачи или None, если описания в посте нет."""
+    """Возвращает суть задачи или None, если описания в посте нет.
 
+    Заголовок нужен, чтобы не выдать его же за описание работы. Если его
+    не передали, считаем сами.
+    """
+
+    title = title or build_title(text)
     lines = text.splitlines()
 
     for index, raw in enumerate(lines):
@@ -388,17 +413,21 @@ def extract_task(text, title=""):
         if formatted:
             return formatted
 
-    # Раздела нет — берём строки, похожие на описание работы.
-    for index, raw in enumerate(lines):
-        line = _clean_line(raw)
-        if not _is_meaningful(line) or _is_noise(raw):
-            continue
-        if title and line[:40] == title[:40]:
-            continue
-        if _starts_with(raw, STOP_HEADERS):
-            continue
-        if not has_match(line, TASK_CUE_PATTERNS):
-            continue
-        return _format_task(_collect(lines, index, skip_first_line_noise=True))
+    # Раздела нет — берём строки, похожие на описание работы. Сначала те,
+    # что начинаются с «нужно», «ищем», «разработать»: они точно про дело.
+    for require_cue in (True, False):
+        for index, raw in enumerate(lines):
+            line = _clean_line(raw)
+            if not _is_meaningful(line) or _is_noise(raw):
+                continue
+            if title and line[:40] == title[:40]:
+                continue
+            if _starts_with(raw, STOP_HEADERS):
+                continue
+            if require_cue and not has_match(line, TASK_CUE_PATTERNS):
+                continue
+            return _format_task(
+                _collect(lines, index, skip_first_line_noise=True)
+            )
 
     return None

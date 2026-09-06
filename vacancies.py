@@ -279,6 +279,43 @@ class VacancyRepository:
 
         return len(outdated)
 
+    def resplit_digests(self, split):
+        """Пересобирает уже сохранённые подборки в отдельные вакансии.
+
+        Разбивка появилась позже сбора, и в базе остались записи, где
+        десяток вакансий лежит одним куском. Повторный запуск безопасен:
+        отдельный пункт на пункты уже не делится.
+
+        Старые отметки «откликнулась» и «не подходит» у подборки перестают
+        действовать: у пунктов свои идентификаторы. Отклонённая когда-то
+        подборка вернётся — но уже отдельными вакансиями, и это честнее:
+        отказ от одного пункта не был отказом от всех остальных.
+
+        Возвращает пару «сколько подборок разобрано, сколько вакансий из
+        них добавлено».
+        """
+
+        digest_ids = []
+        items = []
+
+        for vacancy in self.all():
+            parts = split(vacancy)
+            if len(parts) > 1:
+                digest_ids.append(vacancy.source_id)
+                items.extend(parts)
+
+        if not digest_ids:
+            return 0, 0
+
+        with closing(self._connect()) as connection:
+            connection.executemany(
+                "DELETE FROM vacancies WHERE source_id = ?",
+                [(source_id,) for source_id in digest_ids],
+            )
+
+        added, _ = self.save_posts(items)
+        return len(digest_ids), added
+
     def reclassify_all(self):
         """Пересчитывает разбор по сохранённым текстам.
 
