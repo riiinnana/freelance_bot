@@ -32,7 +32,13 @@ from profiles import (
     MIN_ALLOWED_BUDGET,
     ProfileRepository,
 )
-from rejections import RejectionRepository
+from vacancy_actions import (
+    HIDDEN_ACTIONS,
+    REJECTED,
+    RESPONDED,
+    SKIPPED,
+    VacancyActionRepository,
+)
 from source_settings import (
     COLLECTOR_POST_LIMIT,
     TELEGRAM_CHANNELS,
@@ -56,7 +62,7 @@ bot = Bot(
 )
 
 dp = Dispatcher()
-rejection_repository = RejectionRepository("data/rejections.db")
+action_repository = VacancyActionRepository("data/rejections.db")
 profile_repository = ProfileRepository("data/rejections.db")
 
 # Вакансии, которые попадают в выдачу: точное совпадение с профилем и —
@@ -66,6 +72,18 @@ SHOWN_REASON_CODES = {"match", "off_profile"}
 # Каналы-источники: их упоминания в конце поста — это подпись канала,
 # а не контакт заказчика.
 CHANNEL_USERNAMES = [channel["username"] for channel in TELEGRAM_CHANNELS]
+
+# Ссылки на чат с заказчиком для показанных вакансий. В callback приходит
+# только идентификатор поста, а собирать черновик заново пришлось бы через
+# повторный опрос каналов — то самое ожидание, от которого мы уходим.
+pending_chat_links = {}
+MAX_PENDING_CHAT_LINKS = 200
+
+
+def remember_chat_link(user_id, source_id, chat_url):
+    pending_chat_links[(user_id, source_id)] = chat_url
+    while len(pending_chat_links) > MAX_PENDING_CHAT_LINKS:
+        pending_chat_links.pop(next(iter(pending_chat_links)))
 
 
 class SettingsStates(StatesGroup):
@@ -298,10 +316,15 @@ def format_collected_vacancy(post, result):
     )
 
 
-def candidate_score(post, result, contact_username):
-    """Оценивает релевантность вакансии для выдачи первой."""
+def candidate_score(post, result, contact_username, is_skipped):
+    """Оценивает релевантность вакансии для выдачи первой.
+
+    Пропущенные уходят в конец: они вернутся, только когда свежих
+    вакансий не останется.
+    """
 
     return (
+        not is_skipped,
         not result["off_profile"],
         contact_username is not None,
         -result["priority"],
@@ -344,9 +367,12 @@ async def show_best_vacancy(message, user_id):
         )
         return
 
+    actions = action_repository.actions_for_user(user_id)
+
     candidates = []
     for post in posts:
-        if rejection_repository.is_rejected(user_id, post.source_id):
+        action = actions.get(post.source_id)
+        if action in HIDDEN_ACTIONS:
             continue
 
         result = analyze_vacancy(post.description, profile)
@@ -358,7 +384,9 @@ async def show_best_vacancy(message, user_id):
             source_username=post.source,
             excluded_usernames=CHANNEL_USERNAMES,
         )
-        candidates.append((post, result, contact_username))
+        candidates.append(
+            (post, result, contact_username, action == SKIPPED)
+        )
 
     if not candidates:
         await message.answer(
@@ -366,7 +394,7 @@ async def show_best_vacancy(message, user_id):
         )
         return
 
-    post, result, contact_username = max(
+    post, result, contact_username, _ = max(
         candidates,
         key=lambda item: candidate_score(*item),
     )
@@ -379,11 +407,17 @@ async def show_best_vacancy(message, user_id):
             result["profile_direction_keys"] or result["direction_keys"],
             seed=post.source_id,
         )
+        # Кнопка-ссылка не сообщила бы боту о нажатии, поэтому она
+        # callback: бот успевает отметить отклик и подтянуть следующую
+        # вакансию, пока ты пишешь заказчику.
+        remember_chat_link(
+            user_id, post.source_id, build_chat_link(contact_username, draft)
+        )
         buttons.append(
             [
                 InlineKeyboardButton(
                     text="✉️ Написать заказчику",
-                    url=build_chat_link(contact_username, draft),
+                    callback_data=f"write:{post.source_id}",
                 )
             ]
         )
@@ -400,9 +434,13 @@ async def show_best_vacancy(message, user_id):
     buttons.append(
         [
             InlineKeyboardButton(
-                text="✖️ Отклонить",
+                text="⏭️ Пропустить",
+                callback_data=f"skip:{post.source_id}",
+            ),
+            InlineKeyboardButton(
+                text="✖️ Не подходит",
                 callback_data=f"reject:{post.source_id}",
-            )
+            ),
         ]
     )
 
@@ -651,12 +689,59 @@ async def ask_budget(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@dp.callback_query(F.data.startswith("write:"))
+async def write_to_customer(callback: CallbackQuery):
+    """Отмечает отклик, отдаёт ссылку на чат и сразу ищет следующую.
+
+    Порядок важен: ссылка уходит первой, поэтому её видно мгновенно, а
+    следующая вакансия догружается, пока ты пишешь заказчику.
+    """
+
+    source_id = callback.data.removeprefix("write:")
+    user_id = callback.from_user.id
+
+    action_repository.record(user_id, source_id, RESPONDED)
+    await callback.answer("Отмечено: написала")
+
+    chat_url = pending_chat_links.pop((user_id, source_id), None)
+    if chat_url:
+        await callback.message.answer(
+            "✉️ Черновик готов. Открой чат, поправь под себя и отправь.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="➡️ Открыть чат с заказчиком",
+                            url=chat_url,
+                        )
+                    ]
+                ]
+            ),
+        )
+    else:
+        await callback.message.answer(
+            "Черновик не сохранился — похоже, бот перезапускался. "
+            "Открой вакансию заново через «🔎 Найти вакансии»."
+        )
+
+    await show_best_vacancy(callback.message, user_id)
+
+
+@dp.callback_query(F.data.startswith("skip:"))
+async def skip_vacancy(callback: CallbackQuery):
+    source_id = callback.data.removeprefix("skip:")
+    action_repository.record(callback.from_user.id, source_id, SKIPPED)
+
+    await callback.answer("Пропущена — вернётся позже")
+    await show_best_vacancy(callback.message, callback.from_user.id)
+
+
 @dp.callback_query(F.data.startswith("reject:"))
 async def reject_vacancy(callback: CallbackQuery):
     source_id = callback.data.removeprefix("reject:")
-    rejection_repository.reject(callback.from_user.id, source_id)
-    await callback.answer("Вакансия отклонена")
-    await callback.message.answer("✖️ Вакансия скрыта. Ищу следующую...")
+    action_repository.record(callback.from_user.id, source_id, REJECTED)
+
+    await callback.answer("Больше не покажу")
     await show_best_vacancy(callback.message, callback.from_user.id)
 
 
