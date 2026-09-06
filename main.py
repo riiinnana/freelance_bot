@@ -126,9 +126,6 @@ main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [
             KeyboardButton(text="🔎 Найти вакансии"),
-            KeyboardButton(text="⭐ Подходящие вакансии"),
-        ],
-        [
             KeyboardButton(text="⚙️ Настройки"),
         ],
     ],
@@ -663,11 +660,6 @@ async def handle_buttons(message: Message):
     if message.text == "🔎 Найти вакансии":
         await message.answer("🔎 Ищу лучшую подходящую вакансию...")
         await show_best_vacancy(message, message.from_user.id)
-
-    elif message.text == "⭐ Подходящие вакансии":
-        await message.answer(
-            "⭐ Здесь будут появляться подходящие тебе вакансии."
-        )
 
     elif message.text == "⚙️ Настройки":
         await send_settings(message, profile)
