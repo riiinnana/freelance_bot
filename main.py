@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from applications import build_application_text, build_chat_link, extract_contact_username
 from commitment import ANY, ONE_OFF, ONGOING, commitment_label, commitment_name
 from collection import run_collection_loop
+import error_reports
 from directions import (
     DIRECTION_BY_KEY,
     GROUPS,
@@ -70,6 +71,9 @@ logger = logging.getLogger("freelance_bot")
 # Пусто или не задано — работаем без proxy. Адрес задаётся в .env, чтобы
 # бот запускался в любой среде без правки кода.
 PROXY_URL = os.getenv("PROXY_URL") or None
+
+# Кому слать ошибки. Не задан — работаем как раньше, только в консоль.
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID") or None
 
 if PROXY_URL:
     logger.info("Запросы идут через proxy %s", PROXY_URL)
@@ -950,6 +954,15 @@ async def reject_vacancy(callback: CallbackQuery):
 
 async def main():
     logger.info("Бот запускается")
+
+    if ADMIN_CHAT_ID:
+        error_reports.install(
+            lambda text: bot.send_message(ADMIN_CHAT_ID, text),
+            loop=asyncio.get_running_loop(),
+        )
+        logger.info("Ошибки будут дублироваться в Telegram")
+    else:
+        logger.info("ADMIN_CHAT_ID не задан — ошибки только в консоли")
 
     try:
         await bot.set_my_commands([
